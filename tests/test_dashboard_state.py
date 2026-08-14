@@ -718,6 +718,10 @@ class ProviderSelectionTest(unittest.TestCase):
                 },
             },
         },
+        "opencode": {
+            "model": "opencode/deepseek-v4-flash-free",
+            "models": ["opencode/deepseek-v4-flash-free", "opencode/qwen3-coder"],
+        },
     }
 
     def setUp(self) -> None:
@@ -754,6 +758,54 @@ class ProviderSelectionTest(unittest.TestCase):
         self.assertEqual(snap["providers"]["llama.cpp"], ["qwen"])
         self.assertEqual(snap["default_provider"], "nvidia")
         self.assertIn("qwen", snap["models"])
+
+    def test_snapshot_carries_models_by_backend(self) -> None:
+        """The new-run modal's backend + model flow: picking "gptme" must
+        offer every model reachable through any of its providers (nvidia's
+        and llama.cpp's, combined), and picking "opencode" must offer only
+        opencode's own declared models -- never nvidia/llama.cpp's, and
+        never just the default provider's model alone (the reported bug:
+        selecting "opencode" left the model list showing nvidia/llama.cpp
+        models regardless)."""
+        state = RunState(self.tmp / "runs")
+        snap = state.snapshot()
+        by_backend = snap["models_by_backend"]
+        self.assertEqual(
+            set(by_backend["gptme"]),
+            {"deepseek-ai/deepseek-v4-flash-0731", "meta/llama-3.3-70b-instruct", "qwen"},
+        )
+        self.assertEqual(
+            by_backend["opencode"],
+            ["opencode/deepseek-v4-flash-free", "opencode/qwen3-coder"],
+        )
+        self.assertEqual(snap["default_model_by_backend"]["gptme"], "deepseek-ai/deepseek-v4-flash-0731")
+        self.assertEqual(snap["default_model_by_backend"]["opencode"], "opencode/deepseek-v4-flash-free")
+
+    def test_options_from_body_derives_gptme_provider_from_model(self) -> None:
+        """With no "provider" field sent at all -- the new modal's shape --
+        picking backend "gptme" and model "qwen" must still resolve to the
+        "llama.cpp" provider (the one that actually declares "qwen"), so
+        the run talks to the right base_url/api key instead of nvidia's."""
+        options, _ = RunState._options_from_body(
+            {"backend": "gptme", "model": "qwen"}, "goal"
+        )
+        self.assertEqual(options.provider, "llama.cpp")
+        self.assertEqual(options.model, "qwen")
+
+    def test_options_from_body_rejects_model_not_in_backend(self) -> None:
+        """A gptme-only model sent alongside backend "opencode" must be a
+        clean 400, not a mid-dispatch surprise inside the OpenCode CLI."""
+        with self.assertRaises(ValueError):
+            RunState._options_from_body(
+                {"backend": "opencode", "model": "qwen"}, "goal"
+            )
+
+    def test_options_from_body_opencode_model_needs_no_provider(self) -> None:
+        options, _ = RunState._options_from_body(
+            {"backend": "opencode", "model": "opencode/qwen3-coder"}, "goal"
+        )
+        self.assertIsNone(options.provider)
+        self.assertEqual(options.model, "opencode/qwen3-coder")
 
     def test_run_options_round_trips_provider(self) -> None:
         from kusudaemon.pipeline.driver import RunOptions

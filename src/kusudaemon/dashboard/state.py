@@ -106,6 +106,27 @@ def _providers_models_and_default() -> tuple[dict[str, list[str]], str, list[str
         return {}, "", [], ""
 
 
+def _models_by_backend_and_defaults() -> tuple[dict[str, list[str]], dict[str, str]]:
+    """Return ``(models_by_backend, default_model_by_backend)`` from
+    ``provider.json`` — the new-run modal's backend-then-model flow (the
+    modal used to show a "provider" select built only from ``gptme``'s
+    providers map regardless of which agent backend was chosen, so picking
+    e.g. "opencode" never changed the model list; the model field then sent
+    that wrong-backend model on as an explicit override). Each backend's
+    entry here is its own complete, standalone model list — for ``gptme``
+    that's the union across every configured provider — so selecting a
+    backend and then a model can never name a model that backend doesn't
+    actually serve."""
+    try:
+        from ..provider_config import list_models_by_backend
+
+        models_by_backend = list_models_by_backend()
+        defaults = {name: (models[0] if models else "") for name, models in models_by_backend.items()}
+        return models_by_backend, defaults
+    except Exception:
+        return {}, {}
+
+
 def _provider_config_stat_path() -> Path | None:
     """§E20e (2026-08-12 audit): the file whose stat stamp gates the cached
     models/default-model lookup below. ``config_file_path()`` always
@@ -310,6 +331,19 @@ class RunState:
             return _providers_models_and_default()
         return self._cached_read(path, _providers_models_and_default)
 
+    def _cached_models_by_backend_and_defaults(self) -> tuple[dict[str, list[str]], dict[str, str]]:
+        """Same stat-stamp caching as ``_cached_providers_models_and_default``,
+        for the backend-then-model lookup. Keyed off a synthetic path
+        (``<provider.json>#models_by_backend``) so it lands in its own
+        ``_file_cache`` slot rather than colliding with that method's entry
+        — both are keyed by ``str(path)``, and ``provider.json``'s real
+        path is what both must stat for staleness."""
+        path = _provider_config_stat_path()
+        if path is None:
+            return _models_by_backend_and_defaults()
+        cache_key = path.parent / f"{path.name}#models_by_backend"
+        return self._cached_read(cache_key, _models_by_backend_and_defaults, stat_paths=(path,))
+
     # ------------------------------------------------------------------
     # Run scanning / attachment (read-only browsing across runs_root)
     # ------------------------------------------------------------------
@@ -493,6 +527,7 @@ class RunState:
     # ------------------------------------------------------------------
     def snapshot(self) -> dict[str, Any]:
         providers, default_provider, models, default_model = self._cached_providers_models_and_default()
+        models_by_backend, default_model_by_backend = self._cached_models_by_backend_and_defaults()
         run_dir = self._attached_dir()
         if run_dir is None:
             return {
@@ -502,6 +537,8 @@ class RunState:
                 "default_model": default_model,
                 "providers": providers,
                 "default_provider": default_provider,
+                "models_by_backend": models_by_backend,
+                "default_model_by_backend": default_model_by_backend,
                 "server_time": _now(),
             }
         spec = _read_json(run_spec_path(run_dir)) or {}
@@ -561,6 +598,8 @@ class RunState:
             "default_model": default_model,
             "providers": providers,
             "default_provider": default_provider,
+            "models_by_backend": models_by_backend,
+            "default_model_by_backend": default_model_by_backend,
             "model_override": self.get_model_override(),
             "backend_override": self.get_backend_override(),
             "server_time": _now(),
@@ -863,9 +902,17 @@ class RunState:
                 raise ValueError(f"invalid tier_override: {raw_tier!r} (want T0-T3 or blank)")
             tier_override = normalized_tier
 
-        # The new-run modal's provider select: the chosen provider's
-        # base_url/key feed the direct-call provider. Validated here so an
-        # unknown provider name is a clean 400, not a mid-dispatch surprise.
+        backend = _validated_backend(str(body.get("backend") or _default_backend()))
+        model = str(body.get("model") or "").strip() or None
+
+        # The new-run modal is now backend + model only — no separate
+        # provider select. An explicit "provider" in the body (CLI /
+        # scripted callers) still wins outright and is validated as
+        # before; otherwise, for the "gptme" backend, the provider whose
+        # base_url/api_key_env actually serve the chosen model is derived
+        # from provider.json instead of being asked for separately (each
+        # gptme provider brings its own endpoint, so the model alone
+        # doesn't say which one to call).
         provider = str(body.get("provider") or "").strip() or None
         if provider:
             from ..provider_config import list_providers_with_models
@@ -876,11 +923,25 @@ class RunState:
                     f"unknown provider: {provider!r} "
                     f"(available: {sorted(known_providers)})"
                 )
+        elif backend == "gptme" and model:
+            from ..provider_config import provider_for_model
+
+            provider = provider_for_model(model)
+
+        if model:
+            from ..provider_config import list_models_by_backend
+
+            known_models = list_models_by_backend().get(backend, [])
+            if known_models and model not in known_models:
+                raise ValueError(
+                    f"unknown model {model!r} for backend {backend!r} "
+                    f"(available: {known_models})"
+                )
 
         options = RunOptions(
             goal=_read_text_arg(goal),
-            backend=_validated_backend(str(body.get("backend") or _default_backend())),
-            model=body.get("model") or None,
+            backend=backend,
+            model=model,
             provider=provider,
             source_text=_read_text_arg(str(body.get("source", ""))),
             work_object=work_object,

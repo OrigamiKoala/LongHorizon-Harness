@@ -395,6 +395,69 @@ def list_models_for_backend(
     return models
 
 
+def list_models_by_backend(config_path: Path | None = None) -> dict[str, list[str]]:
+    """Return ``{backend_name: [model, ...]}`` — every ``SUPPORTED_BACKENDS``
+    entry's complete, standalone model list.
+
+    This is what a backend-then-model UI needs (as opposed to
+    ``list_providers_with_models``, which only covers ``gptme``'s internal
+    provider split): for ``gptme``, whose models are declared per named
+    provider, this is the **union** of every provider's models (the
+    default provider's models first, in its own declared order, then the
+    remaining providers in declaration order), deduplicated — so picking
+    "gptme" surfaces every model reachable through *any* configured
+    provider, not just the default one. The three CLI backends
+    (``claude``/``codex``/``opencode``) each have exactly one model list
+    already; this is ``list_models_for_backend()`` verbatim for them.
+    """
+    file_data = read_config_file(config_path)
+    result: dict[str, list[str]] = {}
+
+    gptme = file_data.get("gptme")
+    gptme = gptme if isinstance(gptme, dict) else {}
+    providers = gptme.get("providers") if isinstance(gptme.get("providers"), dict) else {}
+    default = str(gptme.get("default") or "") or DEFAULT_PROVIDER
+    ordered_names = ([default] if default in providers else []) + [
+        n for n in providers if n != default
+    ]
+    gptme_models: list[str] = []
+    for name in ordered_names:
+        entry = providers.get(name)
+        if not isinstance(entry, dict):
+            continue
+        for m in entry.get("models") or []:
+            if isinstance(m, str) and m.strip() and m.strip() not in gptme_models:
+                gptme_models.append(m.strip())
+    result["gptme"] = gptme_models
+
+    for name in _CLI_BACKENDS:
+        result[name] = list_models_for_backend(name, config_path)
+    return result
+
+
+def provider_for_model(model: str, config_path: Path | None = None) -> str | None:
+    """Which ``gptme`` provider declares ``model`` (as its primary ``model``
+    or in its ``models`` list), or ``None`` if none does.
+
+    Lets a caller collapse "provider" + "model" into just "model": once the
+    frontend stops asking the operator to name a provider directly (a
+    backend-then-model flow), the harness still needs to know which
+    provider's ``base_url``/``api_key_env`` a chosen ``gptme`` model
+    belongs to — this recovers that mapping from ``provider.json`` instead
+    of requiring it as a second field.
+    """
+    file_data = read_config_file(config_path)
+    gptme = file_data.get("gptme")
+    gptme = gptme if isinstance(gptme, dict) else {}
+    providers = gptme.get("providers") if isinstance(gptme.get("providers"), dict) else {}
+    for name, entry in providers.items():
+        if not isinstance(entry, dict):
+            continue
+        if model == entry.get("model") or model in (entry.get("models") or []):
+            return str(name)
+    return None
+
+
 def read_backend_config(
     backend: str,
     config_path: Path | None = None,

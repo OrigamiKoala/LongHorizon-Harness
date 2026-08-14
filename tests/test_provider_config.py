@@ -676,6 +676,85 @@ class ConfigFilePathTest(_EnvIsolatedTest):
         self.assertEqual(providers, {})
         self.assertEqual(default_provider, DEFAULT_PROVIDER)
 
+    def test_list_models_by_backend_gptme_unions_all_providers(self) -> None:
+        """The new-run modal's backend+model flow: selecting "gptme" must
+        offer every model reachable through any configured provider, not
+        just the default one -- this is the reported bug (only nvidia's
+        one model showed, llama.cpp's model was unreachable from the UI)."""
+        from kusudaemon.provider_config import list_models_by_backend
+        config = {
+            "gptme": {
+                "default": "nvidia",
+                "providers": {
+                    "nvidia": {
+                        "base_url": "https://integrate.api.nvidia.com/v1",
+                        "model": "deepseek-ai/deepseek-v4-flash-0731",
+                        "api_key_env": "NVIDIA_API_KEY",
+                    },
+                    "llama.cpp": {
+                        "base_url": "http://localhost:8080/v1",
+                        "model": "qwen",
+                        "api_key": "an api key",
+                    },
+                },
+            },
+            "opencode": {
+                "model": "opencode/deepseek-v4-flash-free",
+                "models": ["opencode/deepseek-v4-flash-free", "opencode/qwen3-coder"],
+            },
+        }
+        self._write_config(config)
+        old = Path.cwd()
+        try:
+            os.chdir(self._tmp.name)
+            by_backend = list_models_by_backend()
+        finally:
+            os.chdir(old)
+        # default provider's models come first, then the rest
+        self.assertEqual(by_backend["gptme"], ["deepseek-ai/deepseek-v4-flash-0731", "qwen"])
+        self.assertEqual(
+            by_backend["opencode"],
+            ["opencode/deepseek-v4-flash-free", "opencode/qwen3-coder"],
+        )
+        self.assertEqual(by_backend["claude"], [])
+        self.assertEqual(by_backend["codex"], [])
+
+    def test_list_models_by_backend_missing_config_is_all_empty(self) -> None:
+        from kusudaemon.provider_config import list_models_by_backend
+        by_backend = list_models_by_backend(
+            config_path=Path(self._tmp.name) / "no-such-config.json"
+        )
+        self.assertEqual(by_backend, {"gptme": [], "claude": [], "codex": [], "opencode": []})
+
+    def test_provider_for_model_finds_owning_provider(self) -> None:
+        from kusudaemon.provider_config import provider_for_model
+        config = {
+            "gptme": {
+                "default": "nvidia",
+                "providers": {
+                    "nvidia": {
+                        "base_url": "https://integrate.api.nvidia.com/v1",
+                        "model": "deepseek-ai/deepseek-v4-flash-0731",
+                        "api_key_env": "NVIDIA_API_KEY",
+                    },
+                    "llama.cpp": {
+                        "base_url": "http://localhost:8080/v1",
+                        "model": "qwen",
+                        "api_key": "an api key",
+                    },
+                },
+            },
+        }
+        self._write_config(config)
+        old = Path.cwd()
+        try:
+            os.chdir(self._tmp.name)
+            self.assertEqual(provider_for_model("qwen"), "llama.cpp")
+            self.assertEqual(provider_for_model("deepseek-ai/deepseek-v4-flash-0731"), "nvidia")
+            self.assertIsNone(provider_for_model("no-such-model"))
+        finally:
+            os.chdir(old)
+
     def test_backend_settings_precedence_and_model_override(self) -> None:
         from kusudaemon.provider_config import read_backend_config, list_models_for_backend, ProviderConfigError
         config = {

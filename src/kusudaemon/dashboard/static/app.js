@@ -87,7 +87,7 @@ const state = {
   approvalDrafts: {},
   approvalAnswerDrafts: {},
   pilotDrafts: {},
-  newRun: { runId: "", goal: "", source: "", model: "", provider: "", compile: "", workspace: "", tier: "", backend: "gptme", dispatch_policy: "model", survey_mode: "embedding", max_rounds: 100, max_attempts: 3, max_parallel: 1, document_review: false, inline_spans: false, auto_probe_plan: true },
+  newRun: { runId: "", goal: "", source: "", model: "", compile: "", workspace: "", tier: "", backend: "gptme", dispatch_policy: "model", survey_mode: "embedding", max_rounds: 100, max_attempts: 3, max_parallel: 1, document_review: false, inline_spans: false, auto_probe_plan: true },
   // §3/§6/§7/§10 additions
   // B1-3 (IMPLEMENTATION-PLAN-COST-AND-LIVE.md): honest sseLive — true only
   // while the EventSource is actually delivering; lastSnapshotAt feeds the
@@ -2489,21 +2489,17 @@ function renderNewRunModal() {
     el2.oninput = (e) => set(key, e.target.value);
     return el2;
   };
-  const snapModels = (state.snapshot && state.snapshot.models && state.snapshot.models.length) ? state.snapshot.models : [];
-  const snapProviders = (state.snapshot && state.snapshot.providers) || null;
-  const defaultProvider = (state.snapshot && state.snapshot.default_provider) || "";
-  const providerNames = snapProviders ? Object.keys(snapProviders) : [];
-  // The provider select drives the model dropdown: picking a provider
-  // repopulates models from that provider's declared list, with its first
-  // (primary) model selected by default. Falls back to the flat models
-  // list when the server snapshot carries no per-provider map.
-  let provider = state.newRun.provider || defaultProvider || providerNames[0] || "";
-  if (snapProviders && provider && !snapProviders[provider]) {
-    provider = defaultProvider && snapProviders[defaultProvider] ? defaultProvider : providerNames[0] || "";
-  }
-  if (!state.newRun.provider && provider) state.newRun.provider = provider;
-  const modelOptions = (snapProviders && snapProviders[provider]) ? snapProviders[provider].slice() : snapModels.slice();
-  const defaultModel = (snapProviders && snapProviders[provider] && snapProviders[provider][0]) || (state.snapshot && state.snapshot.default_model) || modelOptions[0] || "";
+  // Backend + model, in that order: the model list is entirely determined
+  // by which agent backend is selected (each backend's own declared model
+  // list in provider.json — for "gptme" that's the union across all of
+  // its named providers, since the run no longer asks separately which
+  // provider to use; the provider whose endpoint actually serves the
+  // chosen model is derived server-side, see provider_config.provider_for_model).
+  const modelsByBackend = (state.snapshot && state.snapshot.models_by_backend) || {};
+  const defaultModelByBackend = (state.snapshot && state.snapshot.default_model_by_backend) || {};
+  const backend = state.newRun.backend || "gptme";
+  const modelOptions = (modelsByBackend[backend] || []).slice();
+  const defaultModel = defaultModelByBackend[backend] || modelOptions[0] || "";
   if (state.newRun.model && !modelOptions.includes(state.newRun.model)) {
     modelOptions.unshift(state.newRun.model);
   }
@@ -2517,21 +2513,17 @@ function renderNewRunModal() {
     f("run_id", "Run id", input("runId", "text", "e.g. monads-01")),
     f("source", "source.txt path or @path", input("source", "text", "@/path/to/corpus.txt or leave empty (workspace)")),
     f("workspace", "workspace root (optional, overrides source)", input("workspace", "text", "@/path/to/repo")),
-    f("provider", "provider",
+    // §2026-08-13: subagent backend for this run. The server validates it
+    // (a select can't produce an invalid value anyway).
+    f("backend", "agent backend",
       el("select", { onchange: (e) => {
-        const p = e.target.value;
-        set("provider", p);
-        set("model", "");  // model dropdown repopulates below on next render
+        set("backend", e.target.value);
+        set("model", "");  // model dropdown repopulates below on next render, for the new backend
       } },
-        providerNames.map((v) => el("option", { value: v, selected: provider === v ? "selected" : null }, v)))),
+        ["gptme", "claude", "codex", "opencode"].map((v) => el("option", { value: v, selected: backend === v ? "selected" : null }, v)))),
     f("model", "model",
       el("select", { onchange: (e) => set("model", e.target.value) },
         modelOptions.map((v) => el("option", { value: v, selected: selectedModel === v ? "selected" : null }, v)))),
-    // §2026-08-13: subagent backend for this run. The server validates it
-    // (a select can't produce an invalid value anyway).
-    f("backend", "subagent backend",
-      el("select", { onchange: (e) => set("backend", e.target.value) },
-        ["gptme", "claude", "codex", "opencode"].map((v) => el("option", { value: v, selected: state.newRun.backend === v ? "selected" : null }, v)))),
     f("compile", "compile command", input("compile", "text", "e.g. python3 -m unittest")),
     // §E7: the server requires exactly T0..T3 or blank (dashboard/state.py's
     // _options_from_body raises on anything else, uppercased and matched
@@ -2586,7 +2578,6 @@ function renderNewRunModal() {
             compile_command: state.newRun.compile || undefined,
             workspace: state.newRun.workspace || undefined,
             model: state.newRun.model || undefined,
-            provider: state.newRun.provider || undefined,
             tier_override: state.newRun.tier || undefined,
             tier_floor: state.newRun.tier || undefined,
             backend: state.newRun.backend,
@@ -2599,7 +2590,7 @@ function renderNewRunModal() {
             inline_spans: state.newRun.inline_spans,
             auto_probe_plan: state.newRun.auto_probe_plan,
           });
-          state.newRun = Object.assign({}, state.newRun, { runId: "", goal: "", source: "", compile: "", workspace: "", model: "", provider: "", tier: "" });
+          state.newRun = Object.assign({}, state.newRun, { runId: "", goal: "", source: "", compile: "", workspace: "", model: "", tier: "" });
           state.newRunOpen = false;
           if (r && r.run_id) await attachRun(r.run_id);
           else apiGet("/api/snapshot").then(applySnapshot).catch(() => {});
