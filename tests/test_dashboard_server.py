@@ -119,6 +119,26 @@ class DashboardServerTest(_ServerTestCase):
             self.assertEqual(resp.status, 200)
             self.assertIn("javascript", resp.headers.get("Content-Type", ""))
 
+    def test_new_run_backend_select_forces_a_render(self) -> None:
+        """2026-08-14: the new-run modal's "agent backend" select cascades
+        into the "model" select's option list (which backend's declared
+        models are shown) -- a DOM update only JS can make, unlike a plain
+        single-select the browser updates on its own. ``applySnapshot``
+        only re-renders on a *changed* server-side snapshot fingerprint,
+        which never fires from picking a backend with no run attached and
+        nothing else happening server-side -- so without an explicit
+        ``render()`` call in this handler, the model dropdown stays frozen
+        on whichever backend was selected when the modal first opened
+        (reported live: picking "opencode" kept showing gptme's models).
+        Source-text regression check, not a DOM test -- this repo has no
+        jsdom harness (§9.4's node --check is the only JS gate)."""
+        with urllib.request.urlopen(self._url("/static/app.js")) as resp:
+            source = resp.read().decode("utf-8")
+        marker = 'f("backend", "agent backend",'
+        idx = source.index(marker)
+        handler = source[idx : idx + 1000]
+        self.assertIn("render();", handler)
+
     def test_contract_endpoint_carries_tokens_and_ceiling(self) -> None:
         # §DASHBOARD-UX §5.3: the Doc tab's ceiling bar needs both the
         # measured contract size and the ceiling it was frozen under.

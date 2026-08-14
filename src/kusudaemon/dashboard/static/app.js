@@ -2518,7 +2518,16 @@ function renderNewRunModal() {
     f("backend", "agent backend",
       el("select", { onchange: (e) => {
         set("backend", e.target.value);
-        set("model", "");  // model dropdown repopulates below on next render, for the new backend
+        set("model", "");
+        // The model <select>'s option list is a cascade off this field —
+        // unlike a plain single-select, the browser can't update another
+        // element's options on its own. applySnapshot() only re-renders
+        // when the server-side snapshot fingerprint changes (§Responsive),
+        // which never happens from picking a backend with no run attached
+        // and nothing else going on server-side — so without this explicit
+        // render(), the model dropdown stays frozen on whatever backend was
+        // selected when the modal first opened.
+        render();
       } },
         ["gptme", "claude", "codex", "opencode"].map((v) => el("option", { value: v, selected: backend === v ? "selected" : null }, v)))),
     f("model", "model",
