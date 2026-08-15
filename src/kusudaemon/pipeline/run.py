@@ -86,9 +86,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--dispatch-policy",
-        choices=("model", "document_order"),
-        default="model",
-        help="document_order skips the per-round orchestrator LLM call and "
+        choices=("model", "document_order", "deterministic"),
+        default="deterministic",
+        help="document_order / deterministic skips the per-round orchestrator LLM call and "
         "dispatches the earliest ready node in document order (PLAN-zeromem.md §1)",
     )
     parser.add_argument(
@@ -99,11 +99,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--survey-mode",
-        choices=("model", "embedding"),
-        default="model",
-        help="embedding replaces the per-window model survey with "
-        "embedding-dissimilarity boundaries (PLAN-zeromem.md §3); "
-        "falls back to model when kusudaemon[retrieval] is not installed.",
+        choices=("auto", "deterministic", "structural", "model"),
+        default="auto",
+        help="Survey boundary detection strategy. 'auto' uses zero-token structural "
+        "survey for large corpora and model survey for small inputs; "
+        "'deterministic'/'structural' uses zero-token heading/page-break splitting; "
+        "'model' uses windowed LLM boundary voting.",
     )
     parser.add_argument(
         "--inline-spans",

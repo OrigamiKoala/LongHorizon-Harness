@@ -266,4 +266,7 @@ def review_node(
         items.extend(payload.get("items", []))
         if str(payload.get("verdict", "fail")) != "pass":
             verdict = "fail"
+            # If any defect requires regenerate (full rewrite), later section calls are redundant
+            if any(item.get("class") == "regenerate" for item in payload.get("items", []) if not item.get("pass", True)):
+                break
     return ReviewVerdict(node_id=node.id, items=items, verdict=verdict, truncated=truncated)

@@ -202,7 +202,7 @@ class RunOptions:
     research_plan: dict[str, list[ResearchQuery]] = field(default_factory=dict)
     max_rounds: int = 100
     max_attempts: int = 3
-    dispatch_policy: str = "model"
+    dispatch_policy: str = "deterministic"
     # PLAN.md §C2: parallel dispatch within each round-loop wave. 1 is
     # today's exact serial behavior; >1 runs that many Writer episodes
     # concurrently per round (wave fill is code-derived from the ready
@@ -685,11 +685,25 @@ class RecursiveDriver:
         signals = measure_signals(goal, work)
         override = (self.options.tier_override or "").upper() or None
         intake_disabled = self.options.no_intake
-        if override == "T3" or (intake_disabled and signals.work_tokens >= 150_000):
-            estimate = ScopeEstimate()
+        if override == "T3" or (override in ("T0", "T1") and intake_disabled) or (intake_disabled and signals.work_tokens >= 150_000):
+            estimate = ScopeEstimate(
+                files_touched="1" if override == "T0" else "few" if override == "T1" else "unknown",
+                artifacts=1 if override in ("T0", "T1") else 1,
+                answerable_without_exploration=bool(override in ("T0", "T1")),
+            )
             question_set = QuestionSet()
-            measured: Tier = "T3" if override == "T3" else classify(signals, estimate)
-            if intake_disabled and signals.work_tokens >= 150_000 and override != "T3":
+            measured: Tier = override if override in ("T0", "T1", "T3") else classify(signals, estimate)
+            if override in ("T0", "T1") and intake_disabled:
+                self._log(
+                    {
+                        "node_id": "-",
+                        "role": "harness",
+                        "round": 0,
+                        "type": "scope_estimate_skipped",
+                        "reason": f"--tier {override} and --no-intake specified; scope estimate skipped",
+                    }
+                )
+            elif intake_disabled and signals.work_tokens >= 150_000 and override != "T3":
                 self._log(
                     {
                         "node_id": "-",
@@ -1240,12 +1254,12 @@ class RecursiveDriver:
         # only) into the research phase — written to disk now so a resume
         # re-uses them without re-calling the model; _build_auto_probe_plan
         # prefers them over the separate windowed plan_probes call.
+        probe_plan_path = self.run_dir / "probe_plan.json"
+        write_text_atomic(
+            probe_plan_path,
+            json.dumps({"probes": probe_sink, "evaluated": True}, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        )
         if probe_sink:
-            probe_plan_path = self.run_dir / "probe_plan.json"
-            write_text_atomic(
-                probe_plan_path,
-                json.dumps({"probes": probe_sink}, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-            )
             self._log(
                 {
                     "node_id": "-",
@@ -1433,8 +1447,9 @@ class RecursiveDriver:
             try:
                 payload = json.loads(plan_file.read_text(encoding="utf-8"))
                 raw = payload.get("probes") if isinstance(payload, dict) else None
+                evaluated = bool(payload.get("evaluated", False)) if isinstance(payload, dict) else False
             except (OSError, json.JSONDecodeError):
-                raw = None
+                raw, evaluated = None, False
             if isinstance(raw, list):
                 suggestions = [
                     ProbeSuggestion(
@@ -1460,6 +1475,8 @@ class RecursiveDriver:
                         }
                     )
                     return plan
+                if evaluated:
+                    return {}
         plan = plan_probes(
             tree,
             self.provider,

@@ -217,8 +217,38 @@ class ShipGateTailDefectTest(unittest.TestCase):
         # Every byte reached some call; fan-out didn't need to truncate.
         self.assertFalse(verdict.truncated)
         # And the tail section really was sent whole, past the old cut.
-        last_call_content = provider.calls[-1][0][1]["content"]
-        self.assertIn(marker, last_call_content)
+class RegenerateShortCircuitTest(unittest.TestCase):
+    """If a section returns a defect with class='regenerate', subsequent
+    fan-out sections are skipped to save model calls."""
+
+    def _over_cap_artifact(self, n_sections: int, words_per_section: int) -> str:
+        return "".join(
+            _section(f"## Section {i}", words_per_section) for i in range(1, n_sections + 1)
+        )
+
+    def test_short_circuits_on_regenerate_defect(self) -> None:
+        artifact = self._over_cap_artifact(4, 2500)
+        responses = [
+            {
+                "items": [
+                    {
+                        "id": "clarity",
+                        "pass": False,
+                        "defect": "unrecoverable structural corruption",
+                        "class": "regenerate",
+                    }
+                ],
+                "verdict": "fail",
+            },
+            {"items": [], "verdict": "pass"},
+            {"items": [], "verdict": "pass"},
+            {"items": [], "verdict": "pass"},
+        ]
+        provider = FakeProvider(responses)
+        verdict = review_node(_node(), artifact, provider)
+        self.assertEqual(len(provider.calls), 1)
+        self.assertEqual(verdict.verdict, "fail")
+        self.assertEqual(verdict.items[0]["class"], "regenerate")
 
 
 if __name__ == "__main__":

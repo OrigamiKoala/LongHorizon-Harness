@@ -248,7 +248,7 @@ async def run_round_loop(
     writer_budget_for: Callable[[TaskNode], EpisodeBudget] | None = None,
     max_rounds: int = 100,
     max_attempts: int = 3,
-    dispatch_policy: DispatchPolicy = "model",
+    dispatch_policy: DispatchPolicy = "deterministic",
     split_handler: SplitHandler | None = None,
     on_node_passed: NodePassedHook | None = None,
     max_parallel: int = 1,
