@@ -1250,7 +1250,7 @@ class RunState:
         approval_store.append(run_dir, approval)
         return approval.to_dict()
 
-    def request_reopen(self, node_id: str, defect: str) -> tuple[dict[str, Any] | None, str]:
+    def request_reopen(self, node_id: str, defect: str, *, driver: Any = None) -> tuple[dict[str, Any] | None, str]:
         """§DASHBOARD-UX §11 reopen action, fixed 2026-08-13 (§E23): the
         operator-facing "reopen a node" affordance must never produce an
         approval whose job then fails. ``reopen_node`` repairs a node *in
@@ -1258,12 +1258,11 @@ class RunState:
         patches the existing artifact). A node that never passed
         (``blocked``/``failed``/``stale``) has nothing to repair in place;
         the only recovery that moves it is a redispatch (reset to pending,
-        fresh attempt budget, re-dispatch) — so this routes to a
-        ``redispatch`` approval instead, which auto-resumes the run on
-        apply (§F5). Mid-flight nodes (``dispatched``/``awaiting_review``)
+        fresh attempt budget, re-dispatch) — so this routes directly to
+        redispatch. Mid-flight nodes (``dispatched``/``awaiting_review``)
         are refused — wait for the episode to end.
 
-        Returns (approval_dict, "") on success or (None, error) on failure."""
+        Returns (result_dict, "") on success or (None, error) on failure."""
         run_dir = self._attached_dir()
         if run_dir is None:
             return None, "no run attached to dashboard"
@@ -1295,7 +1294,7 @@ class RunState:
             return approval.to_dict(), ""
         # blocked / failed / stale: the node never passed — reopen's in-place
         # repair cannot touch it. Route directly to redispatch.
-        return self.request_redispatch(node_id, defect)
+        return self.request_redispatch(node_id, defect, driver=driver)
 
     def escalate(self) -> dict[str, Any]:
         """§DASHBOARD-UX §11: the rail tier chip's escalate action — §B2's
@@ -1334,7 +1333,7 @@ class RunState:
         approval_store.append(run_dir, resolved)
         return True
 
-    def request_redispatch(self, node_id: str, reason: str = "") -> tuple[dict[str, Any] | None, str]:
+    def request_redispatch(self, node_id: str, reason: str = "", *, driver: Any = None) -> tuple[dict[str, Any] | None, str]:
         """Directly redispatch a single node that never made it —
         failed/blocked/stale. Resets status to pending with attempts=0, updates
         last_defect, and starts/re-hosts the driver if not currently running.
@@ -1370,7 +1369,7 @@ class RunState:
         )
         self._invalidate_file_cache(epath)
         if not self.is_hosted(self.attached_run_id):
-            self.start_run({"run_id": self.attached_run_id})
+            self.start_run({"run_id": self.attached_run_id}, driver=driver)
         return {"status": "pending", "node_id": node_id, "kind": "redispatch"}, ""
 
     # ------------------------------------------------------------------
@@ -1794,10 +1793,13 @@ def _host_driver(run_dir: Path, driver: RecursiveDriver, *, on_done: Callable[[]
 
 
 def _set_phase(run_dir: Path, phase: str, status: str, detail: str = "") -> None:
-    phase_path(run_dir).write_text(
-        json.dumps({"phase": phase, "status": status, "detail": detail, "ts": _now()}, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    try:
+        phase_path(run_dir).write_text(
+            json.dumps({"phase": phase, "status": status, "detail": detail, "ts": _now()}, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+    except OSError:
+        pass
 
 
 def _run_amend_job(run_dir: Path, approval_id: str) -> None:
