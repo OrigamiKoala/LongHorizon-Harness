@@ -87,7 +87,7 @@ const state = {
   approvalDrafts: {},
   approvalAnswerDrafts: {},
   pilotDrafts: {},
-  newRun: { runId: "", goal: "", source: "", model: "", compile: "", workspace: "", tier: "", backend: "gptme", dispatch_policy: "model", survey_mode: "embedding", max_rounds: 100, max_attempts: 3, max_parallel: 1, document_review: false, inline_spans: false, auto_probe_plan: true },
+  newRun: { runId: "", goal: "", source: "", model: "", compile: "", workspace: "", tier: "", backend: "gptme", dispatch_policy: "model", survey_mode: "auto", max_rounds: 100, max_attempts: 3, max_parallel: 1, document_review: false, inline_spans: false, auto_probe_plan: true },
   // §3/§6/§7/§10 additions
   // B1-3 (IMPLEMENTATION-PLAN-COST-AND-LIVE.md): honest sseLive — true only
   // while the EventSource is actually delivering; lastSnapshotAt feeds the
@@ -2548,11 +2548,10 @@ function renderNewRunModal() {
       el("select", { onchange: (e) => set("dispatch_policy", e.target.value) },
         [["model", "model"], ["document_order", "document order (0 tokens)"]].map(([v, label]) =>
           el("option", { value: v, selected: state.newRun.dispatch_policy === v ? "selected" : null }, label)))),
-    // §E6: the backend checks survey_mode == "embedding"; "deterministic"
-    // was a no-op that silently fell back to the model survey.
     f("survey", "survey mode",
       el("select", { onchange: (e) => set("survey_mode", e.target.value) },
-        ["model", "embedding"].map((v) => el("option", { value: v, selected: state.newRun.survey_mode === v ? "selected" : null }, v)))),
+        [["auto", "auto (structural on large, 0 tokens)"], ["structural", "structural (0 tokens)"], ["model", "model (windowed LLM)"]].map(([v, label]) =>
+          el("option", { value: v, selected: state.newRun.survey_mode === v ? "selected" : null }, label)))),
     f("max_rounds", "max rounds", input("max_rounds", "number", "100")),
     f("max_attempts", "max attempts", input("max_attempts", "number", "3")),
     // §E20k: RunOptions.max_parallel (pipeline/driver.py) was missing from
