@@ -210,12 +210,11 @@ class RunOptions:
     # who know their provider/workspace can tolerate it should raise it.
     max_parallel: int = 1
     document_review: bool = False
-    # A2-1 (IMPLEMENTATION-PLAN-COST-AND-LIVE.md): deterministic
-    # (embedding-based) survey is the default — model-mode surveying issued
-    # ⌈n_chunks/8⌉ calls and was the dominant cost on large corpora.
-    # _phase_survey already logs `survey_fallback` and degrades to the model
-    # path when the retrieval extra isn't installed.
-    survey_mode: str = "model"
+    # (embedding-based or structural) survey is the default — model-mode surveying
+    # issued ⌈n_chunks/8⌉ calls and was the dominant cost on large corpora.
+    # _phase_survey uses structural/embedding survey automatically or falls back to
+    # zero-token structural survey when the retrieval extra isn't installed.
+    survey_mode: str = "auto"
     # A6-4 (IMPLEMENTATION-PLAN-COST-AND-LIVE.md): inline spans are on by
     # default — a writer episode that must *discover* its inputs with `read`
     # calls pays a full extra round trip per input with the whole
@@ -318,7 +317,7 @@ class RunOptions:
             dispatch_policy=str(data.get("dispatch_policy", "model")),
             max_parallel=int(data.get("max_parallel", 1)),
             document_review=bool(data.get("document_review", False)),
-            survey_mode=str(data.get("survey_mode", "model")),
+            survey_mode=str(data.get("survey_mode", "auto")),
             inline_spans=bool(data.get("inline_spans", True)),
             tier_override=data.get("tier_override"),
             no_intake=bool(data.get("no_intake", False)),
@@ -982,8 +981,7 @@ class RecursiveDriver:
         return dict(approval.answers)
 
     async def _phase_survey(self) -> None:
-        from ..v2.embeddings import embeddings_available
-        from ..v2.survey import prefold_chunks, survey_chunks_deterministic
+        from ..v2.survey import prefold_chunks, survey_chunks_structural
 
         work = self.options.work_object
         if work is not None and work.kind == "workspace":
@@ -1028,40 +1026,18 @@ class RecursiveDriver:
             if subagent_id:
                 self._log({"node_id": subagent_id, "role": "explorer", "round": 0, "type": "session_captured", "phase": "survey"})
             try:
-                # A2-4 (IMPLEMENTATION-PLAN-COST-AND-LIVE.md): pre-fold chunks
-                # up to ~min-unit size before surveying. assemble_spine folds
-                # sub-800-token units away afterward anyway, so surveying the
-                # merged list loses no resolution while cutting the model-mode
-                # call count ~5–8× and the embedding-mode vector count with
-                # it. is_large_corpus is computed from the raw chunks above so
-                # the explorer-subagent decision is unchanged.
-                chunks = prefold_chunks(chunks)
-                if self.options.survey_mode == "embedding" and embeddings_available():
-                    votes = survey_chunks_deterministic(chunks)
+                # A2-4: pre-fold chunks up to ~min-unit size before surveying.
+                # Use adaptive prefolding on large inputs so chunk count is bounded.
+                chunks = prefold_chunks(chunks, target_max_chunks=100)
+
+                mode = self.options.survey_mode
+                if mode == "auto":
+                    mode = "structural" if is_large_corpus or len(chunks) > 20 else "model"
+
+                if mode in ("deterministic", "structural"):
+                    votes = survey_chunks_structural(chunks)
                 else:
-                    if self.options.survey_mode == "embedding":
-                        self._log(
-                            {
-                                "node_id": subagent_id or "-",
-                                "role": "harness",
-                                "round": 0,
-                                "type": "survey_fallback",
-                                "reason": (
-                                    "embedding mode requested but "
-                                    "kusudaemon[retrieval] is not installed; "
-                                    "falling back to the model survey"
-                                ),
-                            }
-                        )
-                    # This wraps plain provider.complete_json calls, not a
-                    # gptme episode -- deliberately not interactive (§3:
-                    # only the Writer needs a tool loop). But the model may
-                    # still return reasoning_content alongside its JSON vote
-                    # (§12), and that was previously discarded entirely,
-                    # leaving the dashboard's explore-01 card with nothing to
-                    # show. Surface it (thinking only, no tool loop) the same
-                    # way a real gptme trace does, so the Chat tab renders it
-                    # without any dashboard-side changes.
+                    # Model survey path
                     on_reasoning = (
                         (lambda text: self._append_explorer_reasoning(subagent_id, text))
                         if subagent_id

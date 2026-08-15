@@ -27,12 +27,8 @@ class EmbeddingsUnavailable(RuntimeError):
 
 
 def embeddings_available() -> bool:
-    """True if ``sentence_transformers`` imports. Never raises."""
-    try:
-        import sentence_transformers  # noqa: F401
-    except ImportError:
-        return False
-    return True
+    """Always False — local models and sentence-transformers are not used."""
+    return False
 
 
 def embed_texts(
@@ -41,31 +37,9 @@ def embed_texts(
     model_name: str = DEFAULT_EMBED_MODEL,
     batch_size: int = 32,
 ) -> list[list[float]]:
-    """L2-normalized embeddings, one per input. Raises
-    ``EmbeddingsUnavailable`` if the extra is missing. Model instances are
-    cached module-level by name — loading BGE-M3 takes seconds and a
-    survey embeds every chunk in one pass."""
-    if not embeddings_available():
-        raise EmbeddingsUnavailable(
-            "sentence-transformers is not installed — `pip install "
-            '"kusudaemon[retrieval]"` enables embedding mode'
-        )
-    encoder = _model_cache.get(model_name)
-    if encoder is None:
-        from sentence_transformers import SentenceTransformer
-        from sentence_transformers import util as _util
-
-        model = SentenceTransformer(model_name)
-
-        def encoder_batch(batch: list[str]) -> list[list[float]]:
-            vectors = model.encode(
-                batch, batch_size=batch_size, normalize_embeddings=True
-            )
-            return [list(vector) for vector in vectors]
-
-        encoder = encoder_batch
-        _model_cache[model_name] = encoder
-    return encoder(list(texts))
+    raise EmbeddingsUnavailable(
+        "Local model embeddings are disabled. Use zero-token structural survey."
+    )
 
 
 def cosine(a: list[float], b: list[float]) -> float:

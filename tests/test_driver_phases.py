@@ -450,7 +450,7 @@ class ExplorerReasoningTest(unittest.TestCase):
                 driver = RecursiveDriver(
                     run_dir,
                     provider=provider,  # type: ignore[arg-type]
-                    options=RunOptions(goal="test", source_text=long_source),
+                    options=RunOptions(goal="test", source_text=long_source, survey_mode="model"),
                     writer_adapter_factory=lambda node: (_ for _ in ()).throw(
                         AssertionError("no writer dispatch expected")
                     ),

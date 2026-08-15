@@ -98,11 +98,12 @@ def build_pipeline_parser() -> argparse.ArgumentParser:
     )
     run_parser.add_argument(
         "--survey-mode",
-        choices=("model", "embedding"),
-        default="model",
-        help="embedding replaces the per-window model survey with "
-        "embedding-dissimilarity boundaries (PLAN-zeromem.md §3); "
-        "falls back to model when kusudaemon[retrieval] is not installed.",
+        choices=("auto", "deterministic", "structural", "model"),
+        default="auto",
+        help="Survey boundary detection strategy. 'auto' uses zero-token structural "
+        "survey for large corpora and model survey for small inputs; "
+        "'deterministic'/'structural' uses zero-token heading/page-break splitting; "
+        "'model' uses windowed LLM boundary voting.",
     )
     run_parser.add_argument(
         "--inline-spans",

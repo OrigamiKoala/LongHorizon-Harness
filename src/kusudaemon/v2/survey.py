@@ -111,23 +111,39 @@ def _merge_small_segments(segments: list[str], min_tokens: int) -> list[str]:
     return merged
 
 
+DEFAULT_TARGET_UNIT_TOKENS = 16_000
+DEFAULT_TARGET_MAX_CHUNKS = 100
+
+
 def prefold_chunks(
-    chunks: list[Chunk], *, max_tokens: int = DEFAULT_MIN_UNIT_TOKENS
+    chunks: list[Chunk],
+    *,
+    max_tokens: int = DEFAULT_MIN_UNIT_TOKENS,
+    target_max_chunks: int | None = None,
 ) -> list[Chunk]:
     """A2-4 (IMPLEMENTATION-PLAN-COST-AND-LIVE.md): merge adjacent chunks up
-    to ~``max_tokens`` before model-mode surveying. ``assemble_spine`` folds
+    to ~``max_tokens`` before surveying. ``assemble_spine`` folds
     sub-``DEFAULT_MIN_UNIT_TOKENS`` units away afterward anyway, so surveying
     the merged list loses no resolution while cutting the chunk count ~5–8×
     on a long corpus.
+
+    When ``target_max_chunks`` is provided (or on multi-million-token inputs),
+    adaptively scales the fold threshold so total chunk count is bounded.
 
     Folding is greedy left-to-right, and a chunk that alone exceeds
     ``max_tokens`` is kept as its own entry (never split) — it was already a
     large structural block ``chunk_text`` chose not to split."""
     if len(chunks) < 2:
         return chunks
+
+    effective_max = max_tokens
+    if target_max_chunks is not None and target_max_chunks > 0:
+        total_tokens = sum(c.tokens for c in chunks)
+        effective_max = max(max_tokens, total_tokens // target_max_chunks)
+
     merged: list[Chunk] = []
     for chunk in chunks:
-        if merged and merged[-1].tokens < max_tokens:
+        if merged and merged[-1].tokens < effective_max:
             prev = merged[-1]
             merged[-1] = Chunk(
                 index=prev.index,
@@ -263,76 +279,6 @@ def survey_chunks(
     return votes
 
 
-def survey_chunks_deterministic(
-    chunks: list[Chunk],
-    *,
-    embed_fn: Callable[[list[str]], list[list[float]]] | None = None,
-    boundary_percentile: float = DEFAULT_BOUNDARY_PERCENTILE,
-    smoothing_window: int = DEFAULT_SMOOTHING_WINDOW,
-) -> list[BoundaryVote]:
-    """Zero-token stage 2 (PLAN-zeromem.md §3.6): boundaries from
-    embedding dissimilarity valleys plus the structural signals
-    ``chunk_text`` already found, instead of one model call per window.
-
-    Returns the same ``BoundaryVote`` list ``survey_chunks`` does, so
-    ``assemble_spine`` — already model-free — is unchanged, including its
-    confidence floor and min-unit folding.
-
-    ``embed_fn`` is injectable so tests drive the algorithm with fake
-    vectors and no optional dependency installed; it defaults to
-    ``embeddings.embed_texts``, which raises ``EmbeddingsUnavailable`` (a
-    loud, non-fatal fallback the driver logs) when the ``retrieval`` extra
-    is missing.
-
-    Boundary selection: a candidate is a **strict local maximum** of the
-    unsmoothed dissimilarity series, kept only if it also clears the
-    ``boundary_percentile`` quantile of the *smoothed, heading-boosted*
-    series. Smoothing sets the contrast threshold against the corpus
-    instead of picking the candidates — the two-series split is what makes
-    a single stylistically odd chunk (a two-index plateau of high
-    dissimilarity, with no strict peak) emit *no* vote: thresholding the
-    plateau alone would keep it, since the top quartile by construction
-    contains the top values. ``assemble_spine``'s highest-confidence-wins
-    merge still runs and is still correct, just with nothing to merge."""
-    if len(chunks) < 2:
-        return []
-    embed_fn = embed_fn or _default_embed
-    vectors = embed_fn([chunk.text for chunk in chunks])
-    dissimilarities = [
-        1.0 - _cosine_of(vectors[i], vectors[i + 1])
-        for i in range(len(chunks) - 1)
-    ]
-
-    smoothed = _smooth(dissimilarities, smoothing_window)
-    for i in range(len(chunks) - 1):
-        if _HEADING_RE.match(chunks[i + 1].text):
-            smoothed[i] = min(1.0, smoothed[i] + HEADING_BOOST)
-
-    threshold = _quantile(smoothed, boundary_percentile)
-    n = len(dissimilarities)
-    votes: list[BoundaryVote] = []
-    for i, value in enumerate(dissimilarities):
-        left = dissimilarities[i - 1] if i > 0 else -1.0
-        right = dissimilarities[i + 1] if i + 1 < n else -1.0
-        is_peak = value > left and value > right
-        # An author-declared heading outranks any embedding gap (§3.6 step
-        # 5): a boosted index is a candidate even on a corpus too uniform to
-        # produce a raw dissimilarity peak.
-        is_heading = _HEADING_RE.match(chunks[i + 1].text) is not None
-        # Smoothing sets corpus-level contrast (threshold + confidence); a
-        # genuine raw peak keeps its full height when clearing it.
-        at_or_above = smoothed[i] >= threshold or value >= threshold
-        if at_or_above and (is_peak or is_heading):
-            votes.append(
-                BoundaryVote(
-                    boundary_after=i,
-                    label=_label_for_chunk(chunks[i + 1]),
-                    confidence=_min_max(smoothed[i], smoothed),
-                )
-            )
-    return votes
-
-
 def _label_for_chunk(chunk: Chunk) -> str:
     """Structural label, never a paraphrase (§3.2: the author's own words,
     with provenance): the first heading line in the chunk, stripped of
@@ -341,6 +287,8 @@ def _label_for_chunk(chunk: Chunk) -> str:
     match = _HEADING_RE.match(chunk.text)
     if match is not None:
         label = _strip_heading_markers(match.group(0))
+        if not label:
+            label = match.group(0).lstrip("#").strip()
     else:
         label = " ".join(chunk.text.split()[:8])
     return label[:120]
@@ -354,42 +302,52 @@ def _strip_heading_markers(line: str) -> str:
     return stripped.strip()
 
 
-def _smooth(values: list[float], window: int) -> list[float]:
-    if window <= 1:
-        return list(values)
-    smoothed: list[float] = []
-    for i in range(len(values)):
-        lo = max(0, i - window)
-        hi = min(len(values), i + window + 1)
-        smoothed.append(sum(values[lo:hi]) / (hi - lo))
-    return smoothed
+def survey_chunks_structural(
+    chunks: list[Chunk],
+    *,
+    target_unit_tokens: int = DEFAULT_TARGET_UNIT_TOKENS,
+    min_unit_tokens: int = DEFAULT_MIN_UNIT_TOKENS,
+) -> list[BoundaryVote]:
+    """Zero-token, model-free, dependency-free structural survey.
+
+    Emits candidate boundaries from structural signals in the text:
+    1. Author-declared headings (markdown #, chapter/section/part headers)
+    2. Explicit page breaks (\\f)
+    3. Target unit token budgeting to avoid oversized units on uniform text.
+
+    Returns a list of BoundaryVotes compatible with assemble_spine without
+    requiring any model calls or embedding packages.
+    """
+    if len(chunks) < 2:
+        return []
+
+    votes: list[BoundaryVote] = []
+    running_tokens = 0
+
+    for i in range(len(chunks) - 1):
+        next_chunk = chunks[i + 1]
+        running_tokens += chunks[i].tokens
+
+        is_heading = _HEADING_RE.match(next_chunk.text) is not None
+        has_page_break = "\f" in chunks[i].text or "\f" in next_chunk.text
+        is_oversized = running_tokens >= target_unit_tokens
+
+        if (is_heading or has_page_break or is_oversized) and running_tokens >= min_unit_tokens:
+            confidence = 1.0 if is_heading else (0.85 if has_page_break else 0.7)
+            votes.append(
+                BoundaryVote(
+                    boundary_after=i,
+                    label=_label_for_chunk(next_chunk),
+                    confidence=confidence,
+                )
+            )
+            running_tokens = 0
+
+    return votes
 
 
-def _quantile(values: list[float], percentile: float) -> float:
-    ordered = sorted(values)
-    if not ordered:
-        return 1.0
-    index = min(len(ordered) - 1, max(0, int(percentile * len(ordered))))
-    return ordered[index]
-
-
-def _min_max(value: float, values: list[float]) -> float:
-    lo, hi = min(values), max(values)
-    if hi == lo:
-        return 0.0
-    return (value - lo) / (hi - lo)
-
-
-def _cosine_of(a: list[float], b: list[float]) -> float:
-    from .embeddings import cosine
-
-    return cosine(a, b)
-
-
-def _default_embed(texts: list[str]) -> list[list[float]]:
-    from .embeddings import embed_texts
-
-    return embed_texts(texts)
+# Alias for backwards compatibility
+survey_chunks_deterministic = survey_chunks_structural
 
 
 @dataclass
@@ -438,7 +396,12 @@ def assemble_spine(
     for i in range(len(bounds) - 1):
         start_chunk = bounds[i] + 1
         end_chunk = bounds[i + 1]
-        label = accepted[bounds[i]].label if bounds[i] in accepted else "Opening section"
+        if bounds[i] in accepted:
+            label = accepted[bounds[i]].label
+        elif bounds[i] == -1 and chunks and _HEADING_RE.match(chunks[0].text):
+            label = _label_for_chunk(chunks[0])
+        else:
+            label = "Opening section"
         tokens = sum(chunk.tokens for chunk in chunks[start_chunk : end_chunk + 1])
         raw_units.append([start_chunk, end_chunk, label, tokens])
 
