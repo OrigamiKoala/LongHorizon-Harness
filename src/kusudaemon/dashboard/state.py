@@ -59,7 +59,7 @@ from ..pipeline.driver import (
     apply_triage,
     reopen_node,
 )
-from ..pipeline.liveness import HEARTBEAT_STALL_AFTER_SECONDS, run_liveness
+from ..pipeline.liveness import HEARTBEAT_STALL_AFTER_SECONDS, _ACTIVE_STATUSES, run_liveness
 from ..pipeline.run_dir import (
     approvals_path,
     driver_pid_path,
@@ -1294,24 +1294,8 @@ class RunState:
             self._invalidate_file_cache(approvals_path(run_dir))
             return approval.to_dict(), ""
         # blocked / failed / stale: the node never passed — reopen's in-place
-        # repair cannot touch it. Route to redispatch (the working recovery).
-        approval = approval_store.Approval.create(
-            "redispatch",
-            title=f"Redispatch {node_id}",
-            message=(
-                f"Status: {node.status} (attempts {node.attempts}). "
-                f"Reason: {defect}"
-            ),
-            options=[
-                {"value": "apply", "label": "Redispatch", "style": "primary"},
-                {"value": "cancel", "label": "Cancel"},
-            ],
-            allow_input=False,
-            context={"node_id": node_id, "reason": defect},
-        )
-        approval_store.append(run_dir, approval)
-        self._invalidate_file_cache(approvals_path(run_dir))
-        return approval.to_dict(), ""
+        # repair cannot touch it. Route directly to redispatch.
+        return self.request_redispatch(node_id, defect)
 
     def escalate(self) -> dict[str, Any]:
         """§DASHBOARD-UX §11: the rail tier chip's escalate action — §B2's
@@ -1351,40 +1335,43 @@ class RunState:
         return True
 
     def request_redispatch(self, node_id: str, reason: str = "") -> tuple[dict[str, Any] | None, str]:
-        """§DASHBOARD-UX §11: re-dispatch a single node that never made it —
-        failed/blocked/stale. Approval-gated (a redispatch costs a Writer
-        episode, same as reopen); on apply the tree is reset so the round
-        loop picks the node up again with a fresh attempt budget. Passed
-        nodes go through reopen instead (a redispatch can't touch them).
+        """Directly redispatch a single node that never made it —
+        failed/blocked/stale. Resets status to pending with attempts=0, updates
+        last_defect, and starts/re-hosts the driver if not currently running.
+        Passed nodes go through reopen instead (a redispatch can't touch them).
 
-        Returns (approval_dict, "") on success or (None, reason) on failure."""
+        Returns (result_dict, "") on success or (None, reason) on failure."""
         run_dir = self._attached_dir()
         if run_dir is None:
             return None, "no run attached to dashboard"
         if not _safe_node_id(node_id):
             return None, f"invalid node id: {node_id!r}"
+        tpath = tree_path(run_dir)
         tree = _load_tree(run_dir)
         node = tree.nodes.get(node_id)
         if node is None:
             return None, f"node {node_id!r} not found in tree (may be a synthetic/derived dispatch — use reopen instead)"
         if node.status in ("passed", "split", "dispatched", "awaiting_review"):
             return None, f"node {node_id!r} is {node.status!r} — not redispatchable (use reopen for passed nodes)"
-        approval = approval_store.Approval.create(
-            "redispatch",
-            title=f"Redispatch {node_id}",
-            message=(
-                f"Status: {node.status} (attempts {node.attempts}). "
-                f"Reason: {reason.strip() or '(none given)'}"
-            ),
-            options=[
-                {"value": "apply", "label": "Redispatch", "style": "primary"},
-                {"value": "cancel", "label": "Cancel"},
-            ],
-            allow_input=False,
-            context={"node_id": node_id, "reason": reason.strip()},
+        node.status = "pending"
+        node.attempts = 0
+        node.last_defect = f"redispatch requested by operator: {reason.strip() or '(no reason)'}"
+        tree.save(tpath)
+        self._invalidate_file_cache(tpath)
+        epath = events_path(run_dir)
+        EventLog(epath).append(
+            {
+                "node_id": node_id,
+                "role": "operator",
+                "round": 0,
+                "type": "node_redispatch_requested",
+                "reason": reason.strip(),
+            }
         )
-        approval_store.append(run_dir, approval)
-        return approval.to_dict(), ""
+        self._invalidate_file_cache(epath)
+        if not self.is_hosted(self.attached_run_id):
+            self.start_run({"run_id": self.attached_run_id})
+        return {"status": "pending", "node_id": node_id, "kind": "redispatch"}, ""
 
     # ------------------------------------------------------------------
     # Per-node view
@@ -1717,11 +1704,24 @@ def _other_driver_pid(run_dir: Path) -> str | None:
     live driver to un-halt — the resume dead-end. Records written before
     B2-3 (no ``heartbeat_ts`` field) fall back to the pid check."""
     try:
+        phase = json.loads(phase_path(run_dir).read_text(encoding="utf-8"))
+        if phase.get("status") not in _ACTIVE_STATUSES:
+            return None
+    except (OSError, ValueError):
+        pass
+
+    try:
         job = json.loads(driver_pid_path(run_dir).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
     if job.get("host") != socket.gethostname():
         return None
+    if job.get("pid") == os.getpid():
+        thread_ident = job.get("thread_ident")
+        if isinstance(thread_ident, int):
+            alive = any(t.ident == thread_ident and t.is_alive() for t in threading.enumerate())
+            if not alive:
+                return None
     heartbeat_ts = job.get("heartbeat_ts")
     if isinstance(heartbeat_ts, (int, float)):
         age = time.time() - heartbeat_ts

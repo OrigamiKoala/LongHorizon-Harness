@@ -432,6 +432,7 @@ async def run_round_loop(
         # here means no call is even made for a round that will never run.
         if should_halt is not None and should_halt():
             break
+        _sync_tree_from_disk(tree, tree_path)
         round_index = first_round + offset
         decision = decide_next_action_with_policy(
             tree,
@@ -599,6 +600,27 @@ async def _transition_after_review(
     await _save_tree_locked(tree, tree_path, tree_lock)
 
 
+def _sync_tree_from_disk(tree: TaskTree, tree_path: str | Path) -> None:
+    try:
+        on_disk = TaskTree.load(tree_path)
+    except Exception:
+        return
+    for node_id, disk_node in on_disk.nodes.items():
+        mem_node = tree.nodes.get(node_id)
+        if mem_node is None:
+            tree.nodes[node_id] = disk_node
+            continue
+        # Preserve external redispatch (node reset to pending on disk)
+        if disk_node.status == "pending" and mem_node.status not in ("dispatched", "awaiting_review"):
+            mem_node.status = "pending"
+            mem_node.attempts = disk_node.attempts
+            mem_node.last_defect = disk_node.last_defect
+        elif disk_node.status == "passed" and mem_node.status != "passed":
+            mem_node.status = "passed"
+            mem_node.attempts = disk_node.attempts
+            mem_node.last_defect = disk_node.last_defect
+
+
 async def _save_tree_locked(
     tree: TaskTree, tree_path: str | Path, tree_lock: asyncio.Lock | None
 ) -> None:
@@ -614,8 +636,10 @@ async def _save_tree_locked(
     task's just-committed status."""
     if tree_lock is not None:
         async with tree_lock:
+            _sync_tree_from_disk(tree, tree_path)
             tree.save(tree_path)
     else:
+        _sync_tree_from_disk(tree, tree_path)
         tree.save(tree_path)
 
 
