@@ -388,6 +388,97 @@ def build_research_adapter(
     raise ValueError(f"unknown backend: {backend!r}")
 
 
+def build_role_adapter(
+    backend: str,
+    *,
+    run_dir: Path | str,
+    phase: str = "role",
+    model: str | None = None,
+    env: Any | None = None,
+) -> AgentAdapter:
+    """Build a tool-less, read-only adapter for harness role/reasoning calls.
+
+    Hard invariants (ROLE-CALLS-VIA-BACKENDS-PLAN.md §1.3):
+    - Zero write/edit/shell tools allowed.
+    - Scratch workspace inside `<run_dir>/tmp/roles/<phase>/`.
+    - Hidden paths: the entire run directory subtree.
+    - Model resolved with `read_backend_config(..., for_role=True)`.
+    """
+    run_dir_path = Path(run_dir)
+    scratch_workspace = run_dir_path / "tmp" / "roles" / phase
+    scratch_workspace.mkdir(parents=True, exist_ok=True)
+    prompt_dir = run_dir_path / "tmp" / "roles" / phase / "prompts"
+    prompt_dir.mkdir(parents=True, exist_ok=True)
+
+    settings = read_backend_config(
+        backend,
+        run_dir=run_dir_path,
+        model=model,
+        for_role=True,
+    )
+
+    hidden = _hidden_run_dir_subtree_for_probe(run_dir_path, scratch_workspace)
+
+    if backend == "gptme":
+        return GptmeAdapter(
+            model=settings.model,
+            api_key=settings.api_key or None,
+            base_url=settings.base_url or None,
+            workspace_path=str(scratch_workspace),
+            prompt_dir=str(prompt_dir),
+            tool_allowlist=(),
+            hidden_paths=hidden,
+        )
+
+    if backend == "claude":
+        disallowed = translate_tools_to_claude_disallowed(())
+        return ClaudeCodeAdapter(
+            model=settings.model,
+            api_key=settings.api_key or None,
+            base_url=settings.base_url or None,
+            workspace_path=str(scratch_workspace),
+            prompt_dir=str(prompt_dir),
+            disallowed_tools=disallowed,
+            hidden_paths=hidden,
+        )
+
+    if backend == "codex":
+        emit_capability_event(
+            run_dir_path,
+            "-",
+            "codex",
+            "tool_allowlist",
+            "Codex does not support tool restrictions for role calls",
+            role=phase,
+        )
+        wire_api = str(settings.extra.get("wire_api") or "responses")
+        return CodexAdapter(
+            model=settings.model,
+            api_key=settings.api_key or None,
+            base_url=settings.base_url or None,
+            wire_api=wire_api,
+            workspace_path=str(scratch_workspace),
+            prompt_dir=str(prompt_dir),
+            sandbox_mode="read-only",
+            hidden_paths=hidden,
+        )
+
+    if backend == "opencode":
+        perms = translate_tools_to_opencode_permissions(())
+        return OpenCodeAdapter(
+            model=settings.model,
+            api_key=settings.api_key or None,
+            base_url=settings.base_url or None,
+            workspace_path=str(scratch_workspace),
+            prompt_dir=str(prompt_dir),
+            permissions=perms,
+            hidden_paths=hidden,
+        )
+
+    raise ValueError(f"unknown backend: {backend!r}")
+
+
+
 _VALID_PLAN_KINDS = ("web", "web_search", "workspace", "corpus", "doc_retrieval")
 
 

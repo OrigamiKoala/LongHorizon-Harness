@@ -42,8 +42,8 @@ from typing import Any, Callable
 
 from ..v0.events import EventLog
 from ..v0.run_dir import resolve_stored
+from ..roles.protocol import RoleProvider
 from ..v1.manifest import read_all_manifest_entries
-from ..v1.provider import OpenAICompatibleProvider
 from ..v1.reviewer import (
     VERDICT_SCHEMA,
     DEFAULT_ARTIFACT_CAP_TOKENS as ARTIFACT_CAP_TOKENS,
@@ -334,7 +334,7 @@ class DocumentReviewResult:
 def run_document_review(
     run_dir: str | Path,
     tree: TaskTree,
-    provider: OpenAICompatibleProvider,
+    provider: RoleProvider,
     *,
     window: int = DEFAULT_REVIEW_WINDOW,
     stride: int = DEFAULT_REVIEW_STRIDE,

@@ -25,8 +25,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from ..roles.protocol import RoleProvider
 from .manifest import read_manifest_tail
-from .provider import OpenAICompatibleProvider
 from .tree import TaskTree
 
 DispatchPolicy = Literal["model", "document_order", "deterministic"]
@@ -83,7 +83,7 @@ def _arbitrate_empty_ready(tree: TaskTree) -> DispatchDecision:
 def decide_next_action(
     tree: TaskTree,
     manifest_path: str,
-    provider: OpenAICompatibleProvider,
+    provider: RoleProvider,
     *,
     round_index: int,
 ) -> DispatchDecision:
@@ -162,7 +162,7 @@ def decide_next_action_deterministic(
 def decide_next_action_with_policy(
     tree: TaskTree,
     manifest_path: str,
-    provider: OpenAICompatibleProvider | None,
+    provider: RoleProvider | None,
     *,
     round_index: int,
     policy: DispatchPolicy = "model",

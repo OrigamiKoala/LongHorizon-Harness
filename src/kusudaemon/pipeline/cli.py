@@ -24,7 +24,7 @@ from pathlib import Path
 from ..environment.local import LocalEnvironment
 from ..v0.events import EventLog
 from ..v0.run_dir import write_text_atomic
-from ..v1.provider import OpenAICompatibleProvider
+from ..roles.factory import make_role_provider
 from ..v1.tree import TaskTree
 from . import approvals as approval_store
 from .backends import build_writer_adapter
@@ -375,8 +375,8 @@ def cmd_amend(argv: argparse.Namespace) -> int:
     run_dir = _require_existing_run(argv.runs_root, argv.run_id)
     if run_dir is None:
         return 1
-    provider = OpenAICompatibleProvider()
     options = _load_options(run_dir)
+    provider = make_role_provider(options=options, run_dir=run_dir)
     phase1 = amend_contract_and_estimate(
         run_dir, rule_text=argv.text, reason=argv.reason
     )

@@ -41,7 +41,7 @@ from ..types import EpisodeBudget
 from ..v0.events import EventLog
 from ..v0.run_dir import node_artifact_path, write_text_atomic
 from ..v1.gates import estimate_tokens
-from ..v1.provider import OpenAICompatibleProvider
+from ..roles.protocol import RoleProvider
 from ..v1.reviewer import (
     VERDICT_SCHEMA,
     DEFAULT_ARTIFACT_CAP_TOKENS as ARTIFACT_CAP_TOKENS,
@@ -141,7 +141,7 @@ def _read_artifact(run_dir: Path, node_id: str) -> str:
 
 
 def _review_against_contract(
-    node: TaskNode, artifact_text: str, contract_text: str, provider: OpenAICompatibleProvider
+    node: TaskNode, artifact_text: str, contract_text: str, provider: RoleProvider
 ) -> ReviewVerdict:
     rubric_lines = (
         "\n".join(f"{j}: {node.rubric.get(j, '')}" for j in node.judgment)
@@ -167,7 +167,7 @@ def _review_against_contract(
 
 
 def revalidate_node(
-    run_dir: str | Path, node: TaskNode, contract_text: str, provider: OpenAICompatibleProvider
+    run_dir: str | Path, node: TaskNode, contract_text: str, provider: RoleProvider
 ) -> Triage:
     artifact_text = _read_artifact(Path(run_dir), node.id)
     verdict = _review_against_contract(node, artifact_text, contract_text, provider)
@@ -179,7 +179,7 @@ def run_revalidation_pass(
     tree: TaskTree,
     tree_path: str | Path,
     contract_text: str,
-    provider: OpenAICompatibleProvider,
+    provider: RoleProvider,
     *,
     node_ids: list[str] | None = None,
     amendment_text: str | None = None,
@@ -255,7 +255,7 @@ async def apply_revalidation_triage(
     triage_by_node: dict[str, Triage],
     writer_adapter_factory: AdapterFactory,
     env: Environment,
-    provider: OpenAICompatibleProvider,
+    provider: RoleProvider,
     log: EventLog,
     *,
     writer_budget: EpisodeBudget | None = None,

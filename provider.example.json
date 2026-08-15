@@ -1,4 +1,8 @@
 {
+  "roles": {
+    "transport": "auto",
+    "backend": null
+  },
   "gptme": {
     "default": "opencode",
     "providers": {
@@ -10,14 +14,17 @@
     }
   },
   "claude": {
-    "model": null
+    "model": null,
+    "role_model": null
   },
   "codex": {
     "model": null,
+    "role_model": null,
     "wire_api": "responses"
   },
   "opencode": {
     "model": "opencode/deepseek-v4-flash-free",
+    "role_model": null,
     "models": [
       "opencode/deepseek-v4-flash-free",
       "opencode/qwen3-coder"

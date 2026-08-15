@@ -47,7 +47,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Literal
 
 from ..v1.gates import estimate_tokens
-from ..v1.provider import OpenAICompatibleProvider
+from ..roles.protocol import RoleProvider
 from .work_object import WorkObject, iter_workspace_paths
 
 Tier = Literal["T0", "T1", "T2", "T3"]
@@ -178,7 +178,7 @@ def _work_digest(work: WorkObject, *, outline_limit: int = 200) -> str:
 def estimate_scope(
     goal: str,
     work: WorkObject,
-    provider: OpenAICompatibleProvider,
+    provider: RoleProvider,
     *,
     on_reasoning: Callable[[str], None] | None = None,
 ) -> ScopeEstimate:
@@ -282,7 +282,7 @@ _FULL_SCOPE_SYSTEM_PROMPT = (
 def estimate_scope_full(
     goal: str,
     work: WorkObject,
-    provider: OpenAICompatibleProvider,
+    provider: RoleProvider,
     *,
     on_reasoning: Callable[[str], None] | None = None,
     streaming: bool = False,

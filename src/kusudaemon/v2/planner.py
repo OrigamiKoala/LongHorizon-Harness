@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from typing import Any, Callable
 
 from ..v0.events import EventLog
-from ..v1.provider import OpenAICompatibleProvider
+from ..roles.protocol import RoleProvider
 from ..v1.tree import NodeBudget, TaskNode, TaskTree
 from .survey import SpineUnit
 
@@ -139,7 +139,7 @@ def _render_slice(
 
 def plan_level(
     units: list[SpineUnit],
-    provider: OpenAICompatibleProvider,
+    provider: RoleProvider,
     *,
     top_level: bool,
     unit_summary_for: Callable[[SpineUnit], str] | None = None,
@@ -322,7 +322,7 @@ def _repair_partition(
 
 def build_tree(
     units: list[SpineUnit],
-    provider: OpenAICompatibleProvider,
+    provider: RoleProvider,
     *,
     depth_cap: int = DEFAULT_DEPTH_CAP,
     node_cap: int = DEFAULT_NODE_CAP,

@@ -295,6 +295,8 @@ class ResolveTest(_EnvIsolatedTest):
         self.assertEqual(data["gptme"]["default"], "opencode")
 
 
+
+
 class EnsureUserConfigTest(_EnvIsolatedTest):
     def test_writes_sample_once_and_never_overwrites(self) -> None:
         path = config_file_path()

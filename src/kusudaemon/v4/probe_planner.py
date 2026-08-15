@@ -52,7 +52,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from ..v1.provider import OpenAICompatibleProvider
+from ..roles.protocol import RoleProvider
 from ..v1.tree import TaskNode, TaskTree
 from ..v3.document_review import window_indices
 from .research import Probe, ProbeKind, ResearchQuery
@@ -253,7 +253,7 @@ def research_plan_from_suggestions(
 
 def plan_probes(
     tree: TaskTree,
-    provider: OpenAICompatibleProvider,
+    provider: RoleProvider,
     *,
     window: int = PROBE_PLANNER_WINDOW,
     stride: int = PROBE_PLANNER_STRIDE,
@@ -292,7 +292,7 @@ def plan_probes(
 
 
 def _ask_one_window(
-    provider: OpenAICompatibleProvider,
+    provider: RoleProvider,
     window_nodes: list[TaskNode],
     on_reasoning: Callable[[str], None] | None = None,
     streaming: bool = False,

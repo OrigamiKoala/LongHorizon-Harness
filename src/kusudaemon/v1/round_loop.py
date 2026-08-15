@@ -104,7 +104,7 @@ from .orchestrator import (
     DispatchPolicy,
     decide_next_action_with_policy,
 )
-from .provider import OpenAICompatibleProvider
+from ..roles.protocol import RoleProvider
 from .reviewer import ReviewVerdict, review_node
 from .run_dir import (
     ensure_audit_path,
@@ -201,7 +201,7 @@ async def review_and_transition_node(
     tree: TaskTree,
     tree_path: str | Path,
     *,
-    provider: OpenAICompatibleProvider,
+    provider: RoleProvider,
     max_attempts: int,
     log: EventLog,
     on_node_passed: NodePassedHook | None = None,
@@ -242,7 +242,7 @@ async def run_round_loop(
     *,
     writer_adapter_factory: AdapterFactory,
     env: Environment,
-    provider: OpenAICompatibleProvider,
+    provider: RoleProvider,
     prompt_for_node: PromptBuilder,
     writer_budget: EpisodeBudget | None = None,
     writer_budget_for: Callable[[TaskNode], EpisodeBudget] | None = None,

@@ -33,7 +33,7 @@ from ..environment.base import Environment
 from ..types import EpisodeBudget
 from ..v0.events import EventLog
 from ..v0.run_dir import node_artifact_path
-from ..v1.provider import OpenAICompatibleProvider
+from ..roles.protocol import RoleProvider
 from ..v1.tree import TaskNode, TaskTree
 from ..v1.writer import run_writer_node
 from .contract import ContractRule
@@ -118,7 +118,7 @@ def approve_pilot(
     run_dir: str | Path,
     node: TaskNode,
     edited_text: str,
-    provider: OpenAICompatibleProvider,
+    provider: RoleProvider,
     log: EventLog,
 ) -> list[ContractRule]:
     """Resume point for a pilot sitting in ``pilot_awaiting_approval``. The
@@ -159,7 +159,7 @@ def _unified_diff(original: str, edited: str) -> str:
 
 
 def _derive_contract_rules(
-    diff_text: str, original: str, provider: OpenAICompatibleProvider
+    diff_text: str, original: str, provider: RoleProvider
 ) -> list[str]:
     messages = [
         {"role": "system", "content": _DERIVE_SYSTEM_PROMPT},

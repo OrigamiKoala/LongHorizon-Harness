@@ -66,7 +66,8 @@ from ..v7.split import handle_split_proposal, maybe_derive_split_parent
 from ..v0.events import EventLog
 from ..v0.run_dir import write_text_atomic
 from ..v0.run_dir import create_run_dir, ensure_node_trace_path, node_trace_path, events_path, glossary_path, manifest_path, node_artifact_path, spec_path
-from ..v1.provider import OpenAICompatibleProvider, ProviderHTTPError
+from ..roles.protocol import RoleProvider
+from ..v1.provider import ProviderHTTPError
 from ..v1.reviewer import ReviewVerdict
 from ..v1.round_loop import run_round_loop
 from ..v1.run_dir import ensure_audit_dir
@@ -413,7 +414,7 @@ class RecursiveDriver:
         self,
         run_dir: str | Path,
         *,
-        provider: OpenAICompatibleProvider,
+        provider: RoleProvider,
         options: RunOptions,
         env: Environment | None = None,
         writer_adapter_factory: WriterAdapterFactory | None = None,
@@ -444,19 +445,25 @@ class RecursiveDriver:
         self._write_source_and_spec()
         self.log = EventLog(events_path(self.run_dir))
         if self.provider is not None:
-            if getattr(self.provider, "_should_abort", None) is None:
+            if hasattr(self.provider, "set_abort_hook"):
+                self.provider.set_abort_hook(self._halted)
+            elif getattr(self.provider, "_should_abort", None) is None:
                 self.provider._should_abort = self._halted
-            if getattr(self.provider, "_on_model_fallback", None) is None:
-                def _on_fallback(from_model: str, to_model: str, reason: str) -> None:
-                    self._log({
-                        "node_id": "-",
-                        "role": "harness",
-                        "round": 0,
-                        "type": "model_fell_back",
-                        "from": from_model,
-                        "to": to_model,
-                        "reason": reason,
-                    })
+
+            def _on_fallback(from_model: str, to_model: str, reason: str) -> None:
+                self._log({
+                    "node_id": "-",
+                    "role": "harness",
+                    "round": 0,
+                    "type": "model_fell_back",
+                    "from": from_model,
+                    "to": to_model,
+                    "reason": reason,
+                })
+
+            if hasattr(self.provider, "set_event_hook"):
+                self.provider.set_event_hook(_on_fallback)
+            elif getattr(self.provider, "_on_model_fallback", None) is None:
                 self.provider._on_model_fallback = _on_fallback
         # §D0c: record who is (supposed to be) making progress, so a
         # phase.json frozen on "in_progress" by a dead process can be told
@@ -699,7 +706,8 @@ class RecursiveDriver:
                     }
                 )
         else:
-            estimate, question_set = estimate_scope_full(
+            estimate, question_set = await asyncio.to_thread(
+                estimate_scope_full,
                 goal,
                 work,
                 self.provider,
@@ -896,7 +904,8 @@ class RecursiveDriver:
                     for item in objections_out
                 ),
             )
-        run_intake(
+        await asyncio.to_thread(
+            run_intake,
             self.run_dir,
             goal,
             ambiguities,
@@ -1058,8 +1067,12 @@ class RecursiveDriver:
                         if subagent_id
                         else None
                     )
-                    votes = survey_chunks(
-                        chunks, self.provider, on_reasoning=on_reasoning, streaming=True
+                    votes = await asyncio.to_thread(
+                        survey_chunks,
+                        chunks,
+                        self.provider,
+                        on_reasoning=on_reasoning,
+                        streaming=True,
                     )
             finally:
                 if subagent_id:
@@ -1231,7 +1244,8 @@ class RecursiveDriver:
 
     async def _phase_plan(self) -> None:
         probe_sink: list[dict[str, Any]] = []
-        tree = build_tree(
+        tree = await asyncio.to_thread(
+            build_tree,
             load_spine(self.run_dir),
             self.provider,
             input_path_for=lambda unit: unit_input_path(self.run_dir, unit),
@@ -1353,7 +1367,7 @@ class RecursiveDriver:
                 context={"node_id": node.id, "shape": node.shape},
             )
             edited = approval.user_input.strip() or _read_artifact(self.run_dir, node.id)
-            rule_texts = approve_pilot(self.run_dir, node, edited, self.provider, self.log)
+            rule_texts = await asyncio.to_thread(approve_pilot, self.run_dir, node, edited, self.provider, self.log)
             rules.extend(ContractRule(source=node.id, shape=node.shape, text=text) for text in rule_texts)
         freeze_contract(self.run_dir, rules)
 
@@ -1788,7 +1802,7 @@ class RecursiveDriver:
         if tree.is_blocked():
             return False
         if self._current_tier() == "T2":
-            review = self._document_review_cached_pass(tree, keep_depth_pass=False)
+            review = await self._document_review_cached_pass(tree, keep_depth_pass=False)
             if review.escalated:
                 return False
             await self._handle_document_review_triage(
@@ -1848,7 +1862,7 @@ class RecursiveDriver:
         cached = self._read_document_review_cache()
         return cached.get("digest") == digest and cached.get("clean") is True
 
-    def _document_review_cached_pass(
+    async def _document_review_cached_pass(
         self, tree: TaskTree, *, keep_depth_pass: bool
     ) -> DocumentReviewResult:
         """PLAN-AUDIT.md §E17: the caching wrapper around
@@ -1871,7 +1885,8 @@ class RecursiveDriver:
                 }
             )
             return DocumentReviewResult()
-        review = run_document_review(
+        review = await asyncio.to_thread(
+            run_document_review,
             self.run_dir,
             tree,
             self.provider,
@@ -2442,7 +2457,7 @@ def run_amendment_revalidation(
     *,
     contract_text: str,
     rule_text: str,
-    provider: OpenAICompatibleProvider,
+    provider: RoleProvider,
     prefilter: bool = True,
 ) -> dict[str, Any]:
     """§10 contract amendment, phase 2 — the read-only re-validation pass
@@ -2475,7 +2490,7 @@ async def amend_and_revalidate(
     *,
     rule_text: str,
     reason: str,
-    provider: OpenAICompatibleProvider,
+    provider: RoleProvider,
     prefilter: bool = True,
 ) -> dict[str, Any]:
     """§10 contract amendment, both phases in one call (for callers that do
@@ -2501,7 +2516,7 @@ async def apply_triage(
     triage: dict[str, Any],
     writer_adapter_factory: WriterAdapterFactory,
     env: Environment,
-    provider: OpenAICompatibleProvider,
+    provider: RoleProvider,
     max_attempts: int = 3,
 ) -> list[str]:
     """§10 second half: dispatch a repair (patch or regenerate, per its
@@ -2548,7 +2563,7 @@ async def reopen_node(
     defect: str,
     writer_adapter_factory: WriterAdapterFactory,
     env: Environment,
-    provider: OpenAICompatibleProvider,
+    provider: RoleProvider,
     max_attempts: int = 3,
 ) -> list[str]:
     """§10 "Reopen node" intervention: mark one passed node stale and

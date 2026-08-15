@@ -25,8 +25,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from ..roles.protocol import RoleProvider
 from .gates import estimate_tokens
-from .provider import OpenAICompatibleProvider
 from .tree import TaskNode
 
 # §11.10.13: the reviewer's input side gets the §8 "small outputs
@@ -174,7 +174,7 @@ def _group_sections(sections: list[str], max_groups: int) -> list[str]:
 
 
 def _call_reviewer(
-    rubric_lines: str, artifact_text: str, provider: OpenAICompatibleProvider,
+    rubric_lines: str, artifact_text: str, provider: RoleProvider,
     on_reasoning: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     messages = [
@@ -190,7 +190,7 @@ def _call_reviewer(
 def review_node(
     node: TaskNode,
     artifact_text: str,
-    provider: OpenAICompatibleProvider,
+    provider: RoleProvider,
     *,
     artifact_cap_tokens: int = DEFAULT_ARTIFACT_CAP_TOKENS,
     on_reasoning: Callable[[str], None] | None = None,

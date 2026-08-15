@@ -30,7 +30,7 @@ from typing import Any, Callable
 
 from ..v0.run_dir import write_text_atomic
 from ..v1.gates import estimate_tokens
-from ..v1.provider import OpenAICompatibleProvider
+from ..roles.protocol import RoleProvider
 from .run_dir import spine_path, spine_unit_path
 
 DEFAULT_MIN_CHUNK_TOKENS = 50
@@ -192,7 +192,7 @@ def _render_window(window: list[Chunk]) -> str:
 
 def survey_chunks(
     chunks: list[Chunk],
-    provider: OpenAICompatibleProvider,
+    provider: RoleProvider,
     *,
     window_size: int = DEFAULT_WINDOW_SIZE,
     stride: int = DEFAULT_WINDOW_STRIDE,

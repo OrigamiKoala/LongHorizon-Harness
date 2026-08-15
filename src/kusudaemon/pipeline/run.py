@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Callable
 
 from ..environment.base import Environment
+from ..roles.factory import make_role_provider
 from ..v0.events import EventLog
 from ..v1.provider import OpenAICompatibleProvider, RATE_LIMIT_BACKOFFS
 from .backends import parse_research_plan
@@ -260,10 +261,12 @@ def run_from_args(argv: list[str] | None = None, *, env: Environment | None = No
         # nothing explaining it. (The run dir already exists by this point:
         # ``create_run_dir`` runs in ``RecursiveDriver.__init__`` before
         # any provider call happens.)
-        provider=OpenAICompatibleProvider(
-            model=options.model,
-            provider=options.provider,
+        provider=make_role_provider(
+            options=options,
+            run_dir=run_dir,
+            env=env,
             on_backoff=_log_rate_limit_backoff_for(run_dir),
+            provider_cls=OpenAICompatibleProvider,
         ),
         options=options,
         env=env,

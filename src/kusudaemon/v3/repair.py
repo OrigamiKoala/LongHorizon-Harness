@@ -55,7 +55,7 @@ from ..v0.events import EventLog
 from ..v0.run_dir import node_artifact_path, write_text_atomic
 from ..v1.gates import GateResult, all_passed, evaluate_gates, write_gate_cache
 from ..v1.manifest import append_manifest_line
-from ..v1.provider import OpenAICompatibleProvider
+from ..roles.protocol import RoleProvider
 from ..v1.reviewer import ReviewVerdict, review_node
 from ..v1.tree import NodeBudget, TaskNode, TaskTree
 from ..v1.writer import run_writer_node
@@ -119,7 +119,7 @@ async def run_repair(
     adapter: AgentAdapter,
     env: Environment,
     budget: EpisodeBudget,
-    provider: OpenAICompatibleProvider,
+    provider: RoleProvider,
     log: EventLog,
     *,
     mode: RepairMode = "patch",

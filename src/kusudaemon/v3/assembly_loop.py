@@ -43,7 +43,7 @@ from ..environment.base import Environment
 from ..types import EpisodeBudget
 from ..v0.events import EventLog
 from ..v0.run_dir import events_path
-from ..v1.provider import OpenAICompatibleProvider
+from ..roles.protocol import RoleProvider
 from ..v1.tree import TaskNode, TaskTree
 from .assemble import AssemblyNotReadyError, AssemblyOutput, assemble
 from .checks import CheckResult, run_cross_cutting_checks, write_checks_json
@@ -89,7 +89,7 @@ async def run_assembly_loop(
     *,
     writer_adapter_factory: AdapterFactory,
     env: Environment,
-    provider: OpenAICompatibleProvider,
+    provider: RoleProvider,
     compile_command: str | None = None,
     writer_budget: EpisodeBudget | None = None,
     max_repairs: int = 3,

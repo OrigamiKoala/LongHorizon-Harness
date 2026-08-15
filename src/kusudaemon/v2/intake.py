@@ -61,7 +61,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
-from ..v1.provider import OpenAICompatibleProvider
+from ..roles.protocol import RoleProvider
 from .run_dir import spec_path
 
 MAX_INTAKE_ROUNDS = 2
@@ -181,7 +181,7 @@ def build_question_set(
     goal: str,
     ambiguities: Sequence[str],
     objections: Sequence[str],
-    provider: OpenAICompatibleProvider,
+    provider: RoleProvider,
     *,
     prior_qa: Sequence[str] = (),
     on_reasoning: Callable[[str], None] | None = None,
@@ -260,7 +260,7 @@ def run_intake(
     goal: str,
     ambiguities: Sequence[str],
     objections: Sequence[str],
-    provider: OpenAICompatibleProvider,
+    provider: RoleProvider,
     ask_fn: AskFn,
     on_reasoning: Callable[[str], None] | None = None,
     initial_question_set: QuestionSet | None = None,

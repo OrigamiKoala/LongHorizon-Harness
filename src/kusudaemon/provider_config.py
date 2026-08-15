@@ -154,13 +154,20 @@ SAMPLE_SETTINGS = {
     },
     "claude": {
         "model": None,
+        "role_model": None,
     },
     "codex": {
         "model": None,
+        "role_model": None,
         "wire_api": "responses",
     },
     "opencode": {
         "model": DEFAULT_MODEL,
+        "role_model": None,
+    },
+    "roles": {
+        "backend": None,
+        "transport": None,
     },
 }
 
@@ -300,12 +307,13 @@ def read_config_file(path: Path | None = None) -> dict[str, object]:
             "opencode": {},
         }
 
-    unknown = sorted(set(data) - set(SUPPORTED_BACKENDS))
+    known_keys = set(SUPPORTED_BACKENDS) | {"roles"}
+    unknown = sorted(set(data) - known_keys)
     if unknown:
         raise ProviderConfigError(
             f"provider config {target}: unknown top-level key(s) {unknown} "
             f"(provider.json is a flat map of backend name to config; "
-            f"expected keys are {list(SUPPORTED_BACKENDS)})"
+            f"expected keys are {sorted(known_keys)})"
         )
 
     result: dict[str, object] = {}
@@ -327,6 +335,13 @@ def read_config_file(path: Path | None = None) -> dict[str, object]:
                     "'provider' key and set 'model' directly."
                 )
             result[name] = block
+    if "roles" in data:
+        roles_block = data.get("roles")
+        if not isinstance(roles_block, dict):
+            raise ProviderConfigError(f"provider config {target}: 'roles' must be an object")
+        result["roles"] = roles_block
+    else:
+        result["roles"] = {}
     return result
 
 
@@ -468,15 +483,17 @@ def read_backend_config(
     api_key: str | None = None,
     extra: dict[str, object] | None = None,
     provider: str | None = None,
+    for_role: bool = False,
 ) -> BackendSettings:
     """Resolve configuration for an agent backend (claude, codex, opencode, gptme).
 
     Precedence ladder (highest first):
     1. Explicit arguments (model, base_url, api_key, extra; ``provider``
        selects which named provider the gptme backend talks to)
-    2. KUSUDAEMON_<BACKEND>_MODEL / _BASE_URL / _API_KEY env vars
+    2. KUSUDAEMON_<BACKEND>_ROLE_MODEL (when for_role=True) /
+       KUSUDAEMON_<BACKEND>_MODEL / _BASE_URL / _API_KEY env vars
     3. Run-level model_override.json, ONLY when it names a model in this backend's models list
-    4. The backend's own top-level block in provider.json
+    4. The backend's own top-level block in provider.json (role_model when for_role=True, else model)
     5. Omit (None / CLI's own defaults)
 
     ``provider`` only affects the ``gptme`` backend (the one backend that
@@ -511,7 +528,7 @@ def read_backend_config(
             prov_entry: dict[str, object] = {}
         else:
             prov_entry = providers[prov_name]
-        raw_m = prov_entry.get("model")
+        raw_m = prov_entry.get("role_model" if for_role and prov_entry.get("role_model") else "model")
         cfg_model = str(raw_m).strip() if raw_m else None
         raw_bu = prov_entry.get("base_url")
         cfg_base_url = str(raw_bu).strip() if raw_bu else None
@@ -519,38 +536,38 @@ def read_backend_config(
         declared_models = list_models_for_backend("gptme", target, provider=prov_name)
 
     elif name == "opencode":
-        raw_m = block.get("model")
+        raw_m = block.get("role_model" if for_role and block.get("role_model") else "model")
         cfg_model = str(raw_m).strip() if raw_m else None
         # No base_url: the OpenCode CLI always talks to OpenCode Zen itself
         # (OpenCodeAdapter never reads a base_url), so it's not read here.
         cfg_api_key_env = str(block.get("api_key_env") or "OPENCODE_API_KEY")
         cfg_extra = {
             k: v for k, v in block.items()
-            if k not in ("model", "api_key_env", "models")
+            if k not in ("model", "role_model", "api_key_env", "models")
         }
         declared_models = list_models_for_backend("opencode", target)
 
     elif name == "claude":
-        raw_m = block.get("model")
+        raw_m = block.get("role_model" if for_role and block.get("role_model") else "model")
         cfg_model = str(raw_m).strip() if raw_m else None
         raw_bu = block.get("base_url")
         cfg_base_url = str(raw_bu).strip() if raw_bu else None
         cfg_api_key_env = str(block.get("api_key_env") or "ANTHROPIC_API_KEY")
         cfg_extra = {
             k: v for k, v in block.items()
-            if k not in ("model", "base_url", "api_key_env", "models")
+            if k not in ("model", "role_model", "base_url", "api_key_env", "models")
         }
         declared_models = list_models_for_backend("claude", target)
 
     elif name == "codex":
-        raw_m = block.get("model")
+        raw_m = block.get("role_model" if for_role and block.get("role_model") else "model")
         cfg_model = str(raw_m).strip() if raw_m else None
         raw_bu = block.get("base_url")
         cfg_base_url = str(raw_bu).strip() if raw_bu else None
         cfg_api_key_env = str(block.get("api_key_env") or "CODEX_API_KEY")
         cfg_extra = {
             k: v for k, v in block.items()
-            if k not in ("model", "base_url", "api_key_env", "models")
+            if k not in ("model", "role_model", "base_url", "api_key_env", "models")
         }
         declared_models = list_models_for_backend("codex", target)
 
@@ -582,10 +599,14 @@ def read_backend_config(
     # 3. Model
     resolved_model: str | None = None
     model_source = "default"
+    env_role_model_var = f"KUSUDAEMON_{name.upper()}_ROLE_MODEL"
     env_model_var = f"KUSUDAEMON_{name.upper()}_MODEL"
     if model:
         resolved_model = model
         model_source = "argument"
+    elif for_role and os.getenv(env_role_model_var):
+        resolved_model = os.environ[env_role_model_var]
+        model_source = env_role_model_var
     elif os.getenv(env_model_var):
         resolved_model = os.environ[env_model_var]
         model_source = env_model_var

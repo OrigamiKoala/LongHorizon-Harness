@@ -960,7 +960,7 @@ class RunState:
         return options, workspace_root
 
     def _default_driver(self, run_dir: Path, options: RunOptions) -> RecursiveDriver:
-        from ..v1.provider import OpenAICompatibleProvider, RATE_LIMIT_BACKOFFS
+        from ..v1.provider import RATE_LIMIT_BACKOFFS
 
         # §D11: same ``on_backoff`` wiring as ``pipeline/run.py`` — a
         # dashboard-hosted run's provider ladder waits are visible on the
@@ -982,10 +982,16 @@ class RunState:
                 }
             )
 
+        from ..roles.factory import make_role_provider
+        from ..v1.provider import OpenAICompatibleProvider
+
         return RecursiveDriver(
             run_dir,
-            provider=OpenAICompatibleProvider(
-                model=options.model, provider=options.provider, on_backoff=_on_backoff
+            provider=make_role_provider(
+                options=options,
+                run_dir=run_dir,
+                on_backoff=_on_backoff,
+                provider_cls=OpenAICompatibleProvider,
             ),
             options=options,
         )
@@ -1863,12 +1869,12 @@ def _run_redispatch_job(run_dir: Path, approval_id: str) -> None:
 
 def _runtime_for(run_dir: Path):
     from ..environment.local import LocalEnvironment
-    from ..v1.provider import OpenAICompatibleProvider
+    from ..roles.factory import make_role_provider
     from ..pipeline.backends import build_writer_adapter
 
     spec = _read_json(run_spec_path(run_dir)) or {}
     options = RunOptions.from_spec(spec)
-    provider = OpenAICompatibleProvider(model=options.model, provider=options.provider)
+    provider = make_role_provider(options=options, run_dir=run_dir)
     env = LocalEnvironment(tmp_dir=str(run_dir / "tmp"))
     work = options.work_object
     workspace_path = (

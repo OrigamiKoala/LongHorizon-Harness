@@ -91,7 +91,11 @@ class ProviderResponse:
 Transport = Callable[[str, dict[str, Any], dict[str, str]], dict[str, Any]]
 
 
-class OpenAICompatibleProvider:
+from ..roles.json_io import _parse_json_object
+from ..roles.protocol import RoleProviderBase
+
+
+class OpenAICompatibleProvider(RoleProviderBase):
     """Thin client for Orchestrator/Planner/Reviewer direct-API calls.
 
     Knows nothing about roles or role/model routing (§12: "a config table,
@@ -519,17 +523,3 @@ def _first_choice_message(raw: dict[str, Any]) -> dict[str, Any]:
     return choices[0].get("message") or {}
 
 
-def _parse_json_object(content: str) -> tuple[dict[str, Any] | None, str]:
-    text = content.strip()
-    if text.startswith("```"):
-        text = text.strip("`")
-        if text.lower().startswith("json"):
-            text = text[4:]
-        text = text.strip()
-    try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError as exc:
-        return None, f"invalid JSON: {exc}"
-    if not isinstance(parsed, dict):
-        return None, "response was not a JSON object"
-    return parsed, ""

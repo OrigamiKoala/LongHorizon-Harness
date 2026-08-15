@@ -100,7 +100,7 @@ or from the dashboard: the backend selector in the run header, the new-run modal
 
 Kusudaemon uses two files in your project workspace root directory to manage models and keys: `provider.json` and `.env`.
 
-1. **Create `provider.json`** to define your provider endpoints and model routing (`api_key_env` can point to any env variable name, such as `OPENCODE_API_KEY` or `ANTHROPIC_API_KEY`):
+1. **Create `provider.json`** to define your provider endpoints, model routing, and role execution:
    ```json
    {
      "default": "opencode",
@@ -110,9 +110,19 @@ Kusudaemon uses two files in your project workspace root directory to manage mod
          "model": "opencode/deepseek-v4-flash-free",
          "api_key_env": "OPENCODE_API_KEY"
        }
+     },
+     "roles": {
+       "transport": "auto",
+       "backend": null,
+       "model": null
      }
    }
    ```
+
+   **Role Execution Routing:**
+   - Harness role calls (`classify`, `survey`, `plan`, `pilot`, `review`, etc.) automatically route through the run's selected backend (`opencode`, `claude`, `codex`) or direct HTTP for `gptme`.
+   - When using `opencode`, `claude`, or `codex`, runs can operate completely **keyless** without any external `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` defined.
+   - You can configure custom role models per-backend via `role_model` in backend settings or `KUSUDAEMON_<BACKEND>_ROLE_MODEL`.
 
 2. **Create `.env`** to store your environment variables and API keys securely:
    ```bash
