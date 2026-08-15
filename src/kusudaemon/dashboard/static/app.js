@@ -273,8 +273,8 @@ function snapshotFingerprint(snap) {
   const sig = (o, keys) => keys.map((k) => `${k}=${o ? o[k] : ""}`).join("&");
   const lastEv = p(snap.events).slice(-1)[0];
   const subs = p(snap.subagents).map((s) => `${s.id}|${s.status}|${s.attempts}|${s.live ? "L" : ""}`).join(";");
-  const pend = p(snap.pending_approvals).map((a) => `${a.approval_id}|${a.updated_at || a.created_at || 0}|${a.status}`).join(";");
-  const apps = p(snap.approvals).map((a) => `${a.approval_id}|${a.updated_at || a.created_at || 0}|${a.status}`).join(";");
+  const pend = p(snap.pending_approvals).map((a) => `${a.approval_id}|${a.resolved_at || a.updated_at || a.created_at || 0}|${a.status}`).join(";");
+  const apps = p(snap.approvals).map((a) => `${a.approval_id}|${a.resolved_at || a.updated_at || a.created_at || 0}|${a.status}|${a.action || ""}`).join(";");
   const jobs = p(snap.jobs).map((j) => `${j.job_id || ""}|${j.status || ""}`).join(";");
   const runs = p(snap.runs).map((r) => `${r.id}|${r.mtime}|${r.phase}|${r.status}|${r.attached ? "A" : ""}|${r.hosted ? "H" : ""}|${r.pending_approvals || 0}|${r.total_tokens || 0}`).join(";");
   return [
@@ -649,7 +649,7 @@ function fmtTokens(n) {
   return num + " tok";
 }
 
-function renderToolChatEntry(e) {
+function renderToolChatEntry(e, key) {
   const isCall = e.role === "tool_call";
   const toolName = e.tool_name || (isCall ? "Tool call" : "Tool result");
   const toolId = e.tool_id ? ` · ${e.tool_id}` : "";
@@ -679,7 +679,7 @@ function renderToolChatEntry(e) {
     }
   }, "📋 copy");
 
-  return el("div", { class: `stream-msg agent-chat-entry role-${e.role} tool-card` }, [
+  return el("div", { class: `stream-msg agent-chat-entry role-${e.role} tool-card`, ...(key ? { "data-key": key } : {}) }, [
     el("details", { class: "tool-details", open: null }, [
       el("summary", { class: "tool-summary" }, [
         el("div", { class: "tool-summary-hdr" }, [
@@ -711,12 +711,12 @@ function renderToolChatEntry(e) {
   ]);
 }
 
-function renderThinkingChatEntry(e) {
+function renderThinkingChatEntry(e, key) {
   const tokenBadge = (e.tokens || e.reasoning_tokens)
     ? el("span", { class: "thinking-token-pill", title: "Reasoning tokens spent on this thought block" }, `🧠 ${fmtTokens(e.tokens || e.reasoning_tokens)}`)
     : null;
   const isLong = (e.text || "").length > 250;
-  return el("div", { class: "stream-msg agent-chat-entry role-thinking thinking-card" }, [
+  return el("div", { class: "stream-msg agent-chat-entry role-thinking thinking-card", ...(key ? { "data-key": key } : {}) }, [
     el("details", { class: "thinking-details", open: !isLong ? "" : null }, [
       el("summary", { class: "thinking-summary" }, [
         el("span", { class: "author" }, _CHAT_ROLE_LABEL.thinking),
@@ -728,8 +728,8 @@ function renderThinkingChatEntry(e) {
   ]);
 }
 
-function renderUsageChatEntry(e) {
-  return el("div", { class: "stream-msg agent-chat-entry role-usage usage-card" }, [
+function renderUsageChatEntry(e, key) {
+  return el("div", { class: "stream-msg agent-chat-entry role-usage usage-card", ...(key ? { "data-key": key } : {}) }, [
     el("div", { class: "msg-hdr" }, [
       el("span", { class: "author", style: "color:var(--accent-green);" }, "📊 Turn Token Usage"),
       el("span", { class: "tool-token-pill" }, `🪙 ${fmtTokens(e.tokens)}`),
@@ -741,11 +741,11 @@ function renderUsageChatEntry(e) {
   ]);
 }
 
-function renderAssistantChatEntry(e) {
+function renderAssistantChatEntry(e, key) {
   const tokenBadge = e.tokens
     ? el("span", { class: "tool-token-pill", style: "margin-left:auto;", title: `Tokens: ${e.tokens} (Prompt: ${e.prompt_tokens || 0}, Completion: ${e.completion_tokens || 0})` }, `🪙 ${fmtTokens(e.tokens)}`)
     : null;
-  return el("div", { class: "stream-msg agent-chat-entry role-assistant" }, [
+  return el("div", { class: "stream-msg agent-chat-entry role-assistant", ...(key ? { "data-key": key } : {}) }, [
     el("div", { class: "msg-hdr" }, [
       el("span", { class: "author" }, _CHAT_ROLE_LABEL.assistant),
       tokenBadge,
@@ -754,9 +754,10 @@ function renderAssistantChatEntry(e) {
   ]);
 }
 
-function renderAgentChatEntry(e) {
+function renderAgentChatEntry(e, idx) {
+  const key = `agent-chat-${e.sort !== undefined ? e.sort : (idx !== undefined ? idx : 0)}-${e.role || ""}-${e.ts !== undefined ? e.ts : (idx !== undefined ? idx : 0)}`;
   if (e.role === "diff") {
-    return el("div", { class: "stream-card agent-diff-card" }, [
+    return el("div", { class: "stream-card agent-diff-card", "data-key": key }, [
       el("div", { class: "card-title" }, el("span", null, _CHAT_ROLE_LABEL.diff)),
       el(
         "pre",
@@ -766,19 +767,19 @@ function renderAgentChatEntry(e) {
     ]);
   }
   if (e.role === "tool_call" || e.role === "tool") {
-    return renderToolChatEntry(e);
+    return renderToolChatEntry(e, key);
   }
   if (e.role === "thinking") {
-    return renderThinkingChatEntry(e);
+    return renderThinkingChatEntry(e, key);
   }
   if (e.role === "usage") {
-    return renderUsageChatEntry(e);
+    return renderUsageChatEntry(e, key);
   }
   if (e.role === "assistant") {
-    return renderAssistantChatEntry(e);
+    return renderAssistantChatEntry(e, key);
   }
   const label = _CHAT_ROLE_LABEL[e.role] || e.role;
-  return el("div", { class: `stream-msg agent-chat-entry role-${e.role}` }, [
+  return el("div", { class: `stream-msg agent-chat-entry role-${e.role}`, "data-key": key }, [
     label ? el("div", { class: "msg-hdr" }, el("span", { class: "author" }, label)) : null,
     el("div", { class: "msg-body" }, e.text),
   ]);
@@ -858,7 +859,7 @@ function renderPendingEntry(m) {
   ]);
 }
 
-function renderEventEntry(ev) {
+function renderEventEntry(ev, idx) {
   const isAutoResume = ev.type === "phase_auto_resuming";
   // §2026-08-13: only a genuine phase exception is a "phase failure".
   // `run_escalated` and `phase_done {status: escalated}` are the round
@@ -867,12 +868,13 @@ function renderEventEntry(ev) {
   // calling them failures made the feed say "click Resume to retry" for
   // a state Resume deterministically re-parks.
   const isFailure = ev.type === "phase_failed";
+  const key = `event-${ev.ts || 0}-${ev.type || ""}-${ev.node_id || ""}-${idx !== undefined ? idx : ""}`;
   // §10: escalation fired → inline feed marker at its own timestamp:
   // `T2 → T3 · split_accepted · node-04`, amber, never re-pinned.
   if (ev.type === "run_tier_escalated") {
     const from = ev.from || "-", to = ev.to || "-";
     const tail = [ev.trigger ? `trigger: ${ev.trigger}` : null, ev.node_id ? `node: ${ev.node_id}` : null].filter(Boolean).join(" · ");
-    return el("div", { class: "stream-msg agent" }, [
+    return el("div", { class: "stream-msg agent", "data-key": key }, [
       el("div", { class: "msg-hdr" }, [
         el("span", { class: "author", style: "color:var(--accent-amber); font-weight:700;" }, `⇡ Tier escalated`),
         el("span", null, fmtTime(ev.ts)),
@@ -886,7 +888,7 @@ function renderEventEntry(ev) {
   // is actually wrong and how to recover, instead of a bare red event.
   if (ev.type === "node_blocked") {
     const nodes = ev.nodes || [];
-    return el("div", { class: "stream-card", style: "border-left: 3px solid var(--accent-amber);" }, [
+    return el("div", { class: "stream-card", "data-key": key, style: "border-left: 3px solid var(--accent-amber);" }, [
       el("div", { class: "card-title" }, [
         el("span", { style: "color:var(--accent-amber); font-weight:700;" }, `⛔ RUN PARKED — ${nodes.length} node${nodes.length === 1 ? "" : "s"} blocked, no ready work`),
         el("span", null, fmtTime(ev.ts)),
@@ -907,7 +909,7 @@ function renderEventEntry(ev) {
   // failure. (`node_blocked` below names the blocked nodes + defects; this
   // card carries the "why" and fires on every resume attempt.)
   if (ev.type === "run_escalated") {
-    return el("div", { class: "stream-card", style: "border-left: 3px solid var(--accent-amber);" }, [
+    return el("div", { class: "stream-card", "data-key": key, style: "border-left: 3px solid var(--accent-amber);" }, [
       el("div", { class: "card-title" }, [
         el("span", { style: "color:var(--accent-amber); font-weight:700;" }, `⛔ RUN PARKED — ${ev.reason || "no ready nodes and nothing in flight"}`),
         el("span", null, fmtTime(ev.ts)),
@@ -919,7 +921,7 @@ function renderEventEntry(ev) {
   // failed after its approval was resolved — surfaced here so a dead action
   // is never invisible again. The detail carries the exception text.
   if (ev.type === "job_failed") {
-    return el("div", { class: "stream-card", style: "border-left: 3px solid var(--accent-amber);" }, [
+    return el("div", { class: "stream-card", "data-key": key, style: "border-left: 3px solid var(--accent-amber);" }, [
       el("div", { class: "card-title" }, [
         el("span", { style: "color:var(--accent-amber); font-weight:700;" }, `⚠ ${ev.kind || "job"} failed`),
         el("span", null, fmtTime(ev.ts)),
@@ -928,7 +930,7 @@ function renderEventEntry(ev) {
     ]);
   }
   if (isFailure) {
-    return el("div", { class: "stream-card phase-error-card" }, [
+    return el("div", { class: "stream-card phase-error-card", "data-key": key }, [
       el("div", { class: "card-title" }, [
         el("span", { style: "color:var(--accent-red); font-weight:700;" }, `❌ Phase Failure (${ev.phase ? ev.phase.toUpperCase() : "FAILURE"})`),
         el("span", null, fmtTime(ev.ts)),
@@ -943,7 +945,7 @@ function renderEventEntry(ev) {
     msgText += ` — Error: "${ev.error}"`;
   }
   const author = isAutoResume ? "🔄 Auto-Resume" : (_EVENT_LABEL[ev.type] || "Event");
-  return el("div", { class: "stream-msg agent", style: isAutoResume ? "border-left: 3px solid var(--accent-amber); background: rgba(245, 158, 11, 0.05);" : "" }, [
+  return el("div", { class: "stream-msg agent", "data-key": key, style: isAutoResume ? "border-left: 3px solid var(--accent-amber); background: rgba(245, 158, 11, 0.05);" : "" }, [
     el("div", { class: "msg-hdr" }, [
       el("span", { class: "author", style: isAutoResume ? "color:var(--accent-amber);" : "" }, author),
       el("span", null, fmtTime(ev.ts)),
@@ -998,7 +1000,7 @@ function renderTriageChips(a) {
 function renderApprovalEntry(a, snap) {
   const isPending = a.status === "pending";
   const parts = [
-    el("div", { class: "card-title" }, [
+    el("div", { class: "card-title", "data-key": `approval-title-${a.approval_id}` }, [
       el("span", { style: isPending ? "color:var(--accent-red); font-weight:700;" : "color:var(--accent-amber); font-weight:700;" }, `⏸ ${isPending ? "APPROVAL" : a.kind.toUpperCase()}: ${a.title}`),
       badge(a.status),
     ]),
@@ -1018,7 +1020,8 @@ function renderApprovalEntry(a, snap) {
           el("button", {
             class: opt.style === "primary" ? "primary" : "",
             disabled: state.busy ? "" : null,
-            onclick: () => guarded(() => apiPost(`/api/approvals/${encodeURIComponent(a.approval_id)}/resolve`, { action: opt.value }).then(() => {
+            onclick: () => guarded(async () => {
+              await apiPost(`/api/approvals/${encodeURIComponent(a.approval_id)}/resolve`, { action: opt.value });
               recordCli("approve");
               // §F5 (blocked-recovery): after a redispatch approval is
               // applied, the node is reset to pending but no driver is
@@ -1030,8 +1033,8 @@ function renderApprovalEntry(a, snap) {
               } else {
                 showToast("Approval resolved");
               }
-              return refreshSnapshot();
-            })),
+              await refreshSnapshot();
+            }),
           }, `[${i + 1}] ${opt.label}`)
         );
       });
@@ -1100,7 +1103,7 @@ function renderApprovalEntry(a, snap) {
       const firstPilot = (state.snapshot.pending_approvals || []).find((x) => x.kind === "pilot");
       const isFirst = firstPilot && firstPilot.approval_id === a.approval_id;
       if (isFirst && state.nodeDetail && state.nodeDetail.id === pid && state.nodeDetail.pilot_original) {
-        parts.push(el("div", { class: "approval-pilot-embed" }, [renderPilotEditor()]));
+        parts.push(el("div", { class: "approval-pilot-embed", "data-key": `approval-pilot-${a.approval_id}` }, [renderPilotEditor()]));
       } else {
         if (state.nodeDetail && state.nodeDetail.id === pid && !state.nodeDetail.pilot_original) loadNodeDetail(pid);
         actionBtns.push(
@@ -1108,7 +1111,7 @@ function renderApprovalEntry(a, snap) {
         );
       }
     }
-    parts.push(el("div", { class: "approval-actions" }, actionBtns));
+    parts.push(el("div", { class: "approval-actions", "data-key": `approval-actions-${a.approval_id}` }, actionBtns));
   } else if (a.status === "resolved") {
     // §DASHBOARD-UX: a resolved batch-form approval (intake rounds) must
     // show what the operator actually answered per question — an
@@ -1133,13 +1136,17 @@ function renderApprovalEntry(a, snap) {
     } else {
       lines.push(`Resolved via action: ${a.action || "completed"}`);
     }
-    parts.push(el("div", { style: "font-size:12px; color:var(--text-bright); font-weight:500; margin-top:6px; background:var(--bg-tertiary); padding:6px 10px; border-radius:4px;" }, lines.map((l) => el("div", null, l))));
+    parts.push(el("div", {
+      class: "approval-resolved-summary",
+      "data-key": `approval-resolved-${a.approval_id}`,
+      style: "font-size:12px; color:var(--text-bright); font-weight:500; margin-top:6px; background:var(--bg-tertiary); padding:6px 10px; border-radius:4px;",
+    }, lines.map((l) => el("div", null, l))));
   }
 
   const cardStyle = isPending
     ? "border:1.5px solid var(--accent-red); background:rgba(244, 63, 94, 0.07);"
     : "border:1.5px solid var(--accent-amber); background:rgba(245, 158, 11, 0.06);";
-  return el("div", { class: "stream-card approval" + (isPending ? " pending" : ""), style: cardStyle }, parts);
+  return el("div", { class: "stream-card approval" + (isPending ? " pending" : ""), style: cardStyle, "data-key": `approval-${a.approval_id}` }, parts);
 }
 
 function liveMap() {
@@ -1434,15 +1441,17 @@ function renderCenterStream() {
   }
   const feedEntries = [];
   const evList = snap.events || [];
-  const lastEvents = evList.slice(-20).map((ev, i) => ({ sort: ev.ts || 0, node: renderEventEntry(ev) }));
+  const lastEvents = evList.slice(-20).map((ev, i) => ({ sort: ev.ts || 0, node: renderEventEntry(ev, i) }));
   feedEntries.push(...lastEvents);
   // Approvals — pending and resolved alike — are entries of the chat history
-  // itself, sorted into chronological position with everything else. No
-  // separate block below the feed, no modal: the same card that asks the
-  // question resolves into the same history line once answered. Pending
-  // cards keep their red styling + the ⏸ title/favicon cue (updateChrome).
-  const allApprovals = (snap.approvals || []).filter((a) => a.status !== "pending").concat(snap.pending_approvals || [])
-    .map((a) => ({ sort: a.created_at || a.updated_at || 0, node: renderApprovalEntry(a, snap) }));
+  // itself, sorted into chronological position with everything else.
+  const seenApprovalIds = new Set();
+  const allApprovals = [];
+  for (const a of (snap.pending_approvals || []).concat(snap.approvals || [])) {
+    if (!a || !a.approval_id || seenApprovalIds.has(a.approval_id)) continue;
+    seenApprovalIds.add(a.approval_id);
+    allApprovals.push({ sort: a.created_at || a.updated_at || 0, node: renderApprovalEntry(a, snap) });
+  }
   feedEntries.push(...allApprovals);
   const pendingMsgs = (state.pendingMessages || []).map((m) => ({ sort: m.ts || 0, node: renderPendingEntry(m) }));
   feedEntries.push(...pendingMsgs);
@@ -1456,11 +1465,11 @@ function renderCenterStream() {
     if (mt.entries.length > shown.length) {
       feedEntries.push({
         sort: shown[0].sort - 0.0001,
-        node: el("div", { class: "dim", style: "font-size:11px; padding:4px 10px;" },
+        node: el("div", { class: "dim", style: "font-size:11px; padding:4px 10px;", "data-key": "thinking-cap-notice" },
           `showing last ${shown.length} of ${mt.total || mt.entries.length} thinking entries for ${mt.agentId}`),
       });
     }
-    feedEntries.push(...shown.map((entry) => ({ sort: entry.sort, node: renderAgentChatEntry(entry) })));
+    feedEntries.push(...shown.map((entry, i) => ({ sort: entry.sort, node: renderAgentChatEntry(entry, i) })));
   }
   feedEntries.sort((a, b) => a.sort - b.sort);
 
