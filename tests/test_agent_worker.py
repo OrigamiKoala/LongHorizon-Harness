@@ -8,6 +8,7 @@ code forwarding, translated stdout, logdir-first line).
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import subprocess
 import sys
@@ -192,6 +193,62 @@ class WorkerEndToEndTest(unittest.TestCase):
             timeout=60,
         )
         self.assertEqual(proc.returncode, 2)
+
+    def test_worker_survives_over_limit_line(self) -> None:
+        # §D13: StreamReader.readline() converts an over-limit line into a
+        # ValueError (not LimitOverrunError), which used to escape _pump and
+        # crash the worker — and with it the episode — whenever a CLI record
+        # exceeded _MAX_LINE_BYTES. The pathological line must drop; the
+        # stream must continue; the child's exit code must still forward.
+        child = (
+            f"{sys.executable} -c \"import sys; "
+            "print('first line'); "
+            "sys.stdout.write('{' + 'x' * 4000 + '}}' + chr(10)); sys.stdout.flush(); "
+            "sys.exit(0)\""
+        )
+        env = dict(os.environ)
+        env["KUSUDAEMON_WORKER_MAX_LINE_BYTES"] = "1024"
+        proc = subprocess.run(
+            [sys.executable, str(_WORKER), "--format", "claude", "--", *shlex.split(child)],
+            input="",
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env=env,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertNotIn("Traceback", proc.stderr)
+        raw_lines = proc.stdout.splitlines()
+        self.assertEqual(raw_lines[-1], "first line")
+
+    def test_worker_dedupes_repeated_step_start_logdir_lines(self) -> None:
+        # §D13: opencode emits one step-start per agent step; each used to
+        # become its own "session started" trace entry. A single episode's
+        # chat flooded with repeated logdir lines (observed: 8 for one node).
+        # Only the bootstrap line and the first session-bearing step-start
+        # may appear.
+        code = (
+            "import sys,json\n"
+            "sys.stdin.read()\n"
+            "for _ in range(3):\n"
+            "    print(json.dumps({'type':'step-start','sessionID':'sess-9'}))\n"
+            "    print(json.dumps({'type':'text','text':'hello'}))\n"
+            "sys.exit(0)\n"
+        )
+        child = f'{sys.executable} -c "{code}"'
+        proc = subprocess.run(
+            [sys.executable, str(_WORKER), "--format", "opencode", "--", *shlex.split(child)],
+            input="",
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        lines = [json.loads(line) for line in proc.stdout.splitlines() if line.startswith("{")]
+        logdir_lines = [line for line in lines if line["type"] == "logdir"]
+        self.assertEqual(len(logdir_lines), 2, [line for line in proc.stdout.splitlines()])
+        self.assertEqual(logdir_lines[0].get("session_id", ""), "")
+        self.assertEqual(logdir_lines[1].get("session_id", ""), "sess-9")
 
     def test_worker_unknown_format_rejected(self) -> None:
         proc = subprocess.run(

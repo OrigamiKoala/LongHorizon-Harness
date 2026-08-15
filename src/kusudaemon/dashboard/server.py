@@ -82,6 +82,7 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qs, unquote, urlsplit
 
+from ..pipeline.run_dir import looks_like_pdf, read_source_file
 from . import rendering
 from .state import RunState
 
@@ -545,7 +546,14 @@ def _get_assembly(handler: "DashboardRequestHandler", match: Any, body: dict) ->
 def _read_text_field(raw: Any) -> str:
     """Server-side ``@path`` resolution for the ``goal``/``source`` fields
     of ``POST /api/runs`` — safely resolves file paths without blocking
-    on non-existent paths, UI placeholders, or stdin."""
+    on non-existent paths, UI placeholders, or stdin.
+
+    §D12 (2026-08-15): a PDF path must go through ``read_source_file`` —
+    the same pypdf extraction the CLI applies. Before, the raw read with
+    ``errors="replace"`` ingested the PDF's bytes verbatim (a 129 MB
+    ``source.txt`` opening with ``%PDF-1.6``), the survey chunked the
+    binary, and the materialized ``spine/*.md`` units came out as PDFs
+    the writer agents could not read."""
     s = str(raw or "").strip()
     if not s or s == "-":
         return s if s != "-" else ""
@@ -557,8 +565,12 @@ def _read_text_field(raw: Any) -> str:
         try:
             if not path.is_file():
                 return ""
+            if looks_like_pdf(path):
+                # Extract via pypdf; a scanned/no-text PDF raises ValueError
+                # and must not fall back to the raw bytes read below.
+                return read_source_file(path)
             return path.read_text(encoding="utf-8", errors="replace").strip()
-        except (OSError, UnicodeError):
+        except (OSError, UnicodeError, ValueError):
             return ""
     return s
 

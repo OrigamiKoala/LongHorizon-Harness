@@ -170,14 +170,16 @@ def _promotions_of(node: TaskNode, run_dir: Path) -> str:
     if not node.depends_on:
         return ""
     entries = read_all_manifest_entries(run_dir / "manifest.jsonl")
-    by_node: dict[str, list[str]] = {}
+    latest_by_node: dict[str, str] = {}
     for entry in entries:
+        node_id = str(entry.get("node") or "").strip()
         promotion = str(entry.get("promotion") or "").strip()
-        if promotion:
-            by_node.setdefault(str(entry.get("node") or ""), []).append(promotion)
+        if node_id and promotion:
+            latest_by_node[node_id] = promotion
     lines: list[str] = []
     for dep_id in node.depends_on:
-        for promotion in by_node.get(dep_id, []):
+        promotion = latest_by_node.get(dep_id)
+        if promotion:
             lines.append(f"- [{dep_id}] {promotion}")
     return "\n".join(lines)
 

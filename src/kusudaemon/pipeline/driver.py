@@ -487,7 +487,6 @@ class RecursiveDriver:
         revisited by name alone — see ``_ran_key`` for why a name like
         "execute" must be tracked per-tier rather than once ever (it means
         something structurally different at T0 than at T2)."""
-        report = await self._run_phase("classify", round_index=0)
         # B2-3: a heartbeat thread keeps driver.pid.json's heartbeat_ts
         # fresh while this driver thread is alive — the signal that lets
         # liveness tell a working driver from a dead one even when the
@@ -1032,7 +1031,7 @@ class RecursiveDriver:
 
                 mode = self.options.survey_mode
                 if mode == "auto":
-                    mode = "structural" if is_large_corpus or len(chunks) > 20 else "model"
+                    mode = "structural"
 
                 if mode in ("deterministic", "structural"):
                     votes = survey_chunks_structural(chunks)

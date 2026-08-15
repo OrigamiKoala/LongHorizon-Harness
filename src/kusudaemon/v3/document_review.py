@@ -58,7 +58,7 @@ from .revalidate import Triage
 DEFAULT_REVIEW_WINDOW = 120  # nodes per windowed pass call (§8.6)
 DEFAULT_REVIEW_STRIDE = 100  # overlap so boundary defects aren't split
 
-_TERM_INDEX_CAP = 250  # most distinctive entries per window, rendered first
+_TERM_INDEX_CAP = 60  # most distinctive entries per window, rendered first
 
 _BOLDED_RE = re.compile(r"\*\*([^*\n]+)\*\*")
 _CAPITALIZED_PHRASE_RE = re.compile(

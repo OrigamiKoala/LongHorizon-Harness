@@ -126,6 +126,26 @@ def resolve_run_dir(root: str | Path, run_id: str) -> Path:
     return resolve_runs_root(root) / run_id
 
 
+def looks_like_pdf(path: Path) -> bool:
+    """Detect a PDF by extension *or* by ``%PDF`` magic header.
+
+    The magic sniff exists because a run's materialized ``spine/*.md``
+    units inherit the corpus's bytes verbatim: a PDF ingested raw is still
+    a PDF even when it lives in a file named ``.md``. Both the CLI
+    (``read_source_file``) and the dashboard's ``@path`` resolution
+    (``dashboard/server.py:_read_text_field``) must agree on this test, or
+    one surface silently dumps raw PDF bytes into ``source.txt`` and the
+    other extracts text — the 2026-08-15 §D12 defect.
+    """
+    if path.suffix.lower() == ".pdf":
+        return True
+    try:
+        with path.open("rb") as f:
+            return f.read(5).startswith(b"%PDF")
+    except OSError:
+        return False
+
+
 def read_source_file(path: str | Path) -> str:
     """Safely read text or extract PDF text from path.
 
@@ -138,17 +158,7 @@ def read_source_file(path: str | Path) -> str:
     if not p.is_file():
         raise ValueError(f"not a file: {p}")
 
-    is_pdf = p.suffix.lower() == ".pdf"
-    if not is_pdf:
-        try:
-            with p.open("rb") as f:
-                header = f.read(5)
-                if header.startswith(b"%PDF"):
-                    is_pdf = True
-        except OSError:
-            pass
-
-    if is_pdf:
+    if looks_like_pdf(p):
         try:
             import pypdf
         except ImportError as exc:

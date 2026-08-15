@@ -61,6 +61,39 @@ def _write_scripted_run(runs_root: Path, run_id: str) -> Path:
     return run_dir
 
 
+def _minimal_pdf() -> bytes:
+    """A hand-built single-page PDF with one extractable text run. Built
+    with correct xref offsets so pypdf (the suite's only optional dep,
+    imported lazily by read_source_file) extracts 'Hello PDF world'."""
+    objs = [
+        b"1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n",
+        b"2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n",
+        b"3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 200 200] "
+        b"/Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >> endobj\n",
+    ]
+    stream = b"BT /F1 12 Tf 20 100 Td (Hello PDF world) Tj ET"
+    objs.append(
+        b"4 0 obj << /Length %d >> stream\n" % len(stream) + stream + b"\nendstream endobj\n"
+    )
+    objs.append(b"5 0 obj << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> endobj\n")
+    out = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+    offsets = [0]
+    for o in objs:
+        offsets.append(len(out))
+        out += o
+    xref_pos = len(out)
+    n = len(objs) + 1
+    out += b"xref\n0 %d\n" % n
+    out += b"0000000000 65535 f \n"
+    for off in offsets[1:]:
+        out += b"%010d 00000 n \n" % off
+    out += b"trailer << /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (n, xref_pos)
+    return bytes(out)
+
+
+_MINIMAL_PDF = _minimal_pdf()
+
+
 class _ServerTestCase(unittest.TestCase):
     control_enabled = True
     auth_token = ""
@@ -928,6 +961,33 @@ class MaxConcurrentRunsTest(_ServerTestCase):
         res = _read_text_field(f"@{non_utf8_file}")
         self.assertIn("hello", res)
         self.assertIn("world", res)
+
+    def test_read_text_field_extracts_pdf(self) -> None:
+        # §D12: @path to a real PDF must extract text via read_source_file,
+        # not dump raw PDF bytes into source.txt (the spine file is "a PDF"
+        # because the corpus was ingested raw).
+        try:
+            import pypdf  # noqa: F401
+        except ImportError:
+            self.skipTest("pypdf not installed")
+        pdf_file = self.tmp / "book.pdf"
+        pdf_file.write_bytes(_MINIMAL_PDF)
+        res = _read_text_field(f"@{pdf_file}")
+        self.assertIn("Hello PDF world", res)
+        self.assertNotIn("%PDF", res)
+
+    def test_read_text_field_sniffs_pdf_magic_header(self) -> None:
+        # §D12: a .md-named file whose bytes start with %PDF is still a PDF
+        # — the exact spine-unit misdetection this defect produced.
+        try:
+            import pypdf  # noqa: F401
+        except ImportError:
+            self.skipTest("pypdf not installed")
+        fake = self.tmp / "unit-01.md"
+        fake.write_bytes(_MINIMAL_PDF)
+        res = _read_text_field(f"@{fake}")
+        self.assertIn("Hello PDF world", res)
+        self.assertNotIn("%PDF", res)
 
 
 if __name__ == "__main__":

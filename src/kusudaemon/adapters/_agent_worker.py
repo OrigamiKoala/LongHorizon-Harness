@@ -64,6 +64,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 import tempfile
 import threading
@@ -74,7 +75,10 @@ CLAUDE = "claude"
 CODEX = "codex"
 OPENCODE = "opencode"
 
-_MAX_LINE_BYTES = 64 * 1024 * 1024
+# §D13: an over-limit stdout line must drop, not crash the episode. The
+# env override exists so the end-to-end test can exercise the drop path
+# with a small ceiling instead of printing 64 MB.
+_MAX_LINE_BYTES = int(os.environ.get("KUSUDAEMON_WORKER_MAX_LINE_BYTES", 64 * 1024 * 1024))
 _CAP = 300
 _HEARTBEAT_SECONDS = 10.0
 
@@ -465,12 +469,24 @@ def translate_line(line: str, fmt: str, session_dir: str = "") -> list[str] | No
 
 
 async def _pump(proc: asyncio.subprocess.Process, fmt: str, session_dir: str) -> None:
+    # §D13: opencode's CLI emits one step-start per agent step, each
+    # translated into a logdir line — without dedupe, a single episode's
+    # trace fills with repeated "session started" entries (one per step).
+    # The bootstrap logdir line (no session_id) and the first step-start
+    # (session_id attached) are the only two that carry information; exact
+    # (logdir, session_id) repeats are dropped.
+    emitted_sessions: set[tuple[str, str]] = set()
     while True:
         try:
             data = await proc.stdout.readline()  # type: ignore[union-attr]
-        except asyncio.LimitOverrunError:
-            # A single pathological line beyond _MAX_LINE_BYTES: skip it
-            # rather than wedging the whole episode.
+        except (asyncio.LimitOverrunError, ValueError):
+            # §D13: a single line beyond _MAX_LINE_BYTES. StreamReader.
+            # readline() converts the over-limit LimitOverrunError into a
+            # ValueError (after clearing its buffer) — catching only
+            # LimitOverrunError let the ValueError escape and crash the
+            # whole worker, and with it the episode, the moment any CLI
+            # record exceeded the limit. The line is dropped and the pump
+            # carries on; the buffer was already cleared by readline.
             continue
         if not data:
             return
@@ -478,6 +494,16 @@ async def _pump(proc: asyncio.subprocess.Process, fmt: str, session_dir: str) ->
         # original content, and print() supplies the single newline.
         text = data.decode("utf-8", errors="replace").rstrip("\n")
         for emitted in translate_line(text, fmt, session_dir) or []:
+            if emitted.startswith("{"):
+                try:
+                    rec = json.loads(emitted)
+                except json.JSONDecodeError:
+                    rec = None
+                if isinstance(rec, dict) and rec.get("type") == "logdir":
+                    key = (str(rec.get("logdir") or ""), str(rec.get("session_id") or ""))
+                    if key in emitted_sessions:
+                        continue
+                    emitted_sessions.add(key)
             print(emitted, flush=True)
 
 

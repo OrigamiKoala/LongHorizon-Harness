@@ -246,7 +246,7 @@ Stdlib `unittest`. No pytest, no network, no agent binary, no API key.
 python3 -m unittest discover -s tests -p "test_*.py" -v
 ```
 
-**818 tests, all passing.** *(2026-08-13: 855 after the claude/codex backend port — `test_agent_worker.py`, `test_backends_claude_codex.py`; 905 after the backend-override work — `test_backend_toggle.py`. 2026-08-14: 940 after the `provider.json` schema rewrite (§12) and an in-flight gptme provider-selection feature landed the same day; 947 after the new-run modal backend+model fix; 949 after `resolve()`'s opencode-backend-model routing — `test_provider_config.py`.)*
+**818 tests, all passing.** *(2026-08-13: 855 after the claude/codex backend port — `test_agent_worker.py`, `test_backends_claude_codex.py`; 905 after the backend-override work — `test_backend_toggle.py`. 2026-08-14: 940 after the `provider.json` schema rewrite (§12) and an in-flight gptme provider-selection feature landed the same day; 947 after the new-run modal backend+model fix; 949 after `resolve()`'s opencode-backend-model routing — `test_provider_config.py`. 2026-08-15: 954 after §D12/§D13 — PDF extraction through the dashboard, over-limit-line survival, logdir dedupe.)*
 
 **Every test file starts with `sys.path.insert(0, str(_REPO_ROOT / "src"))`.** This is load-bearing to prevent stale editable install imports.
 
@@ -269,7 +269,7 @@ python3 -m unittest discover -s tests -p "test_*.py" -v
 | `test_v4_research.py` / `_mcp_research.py` / `_research_loop.py` | 9 | Probe execution, SearXNG tool, research findings |
 | `test_v4_probes.py` / `_probe_planner.py` | 43 | Structural exploration probes, windowed probe suggestions, plan-call probe folding |
 | `test_workspace_read_tool.py` | 9 | Sandboxed directory listing and grep within root |
-| `test_dashboard_state.py` / `_server.py` | 128 | `RunState` caching, HTTP server, auth, concurrency caps, action routes, hosted-run lifecycle, reopen routing, job-failure events |
+| `test_dashboard_state.py` / `_server.py` | 130 | `RunState` caching, HTTP server, auth, concurrency caps, action routes, hosted-run lifecycle, reopen routing, job-failure events, PDF @path extraction (§D12 2026-08-15) |
 | `test_dashboard_rendering.py` | 17 | Log parsing, ` thinking` tag extraction, inline diff generation |
 | `test_pipeline_prompts.py` / `_backends.py` / `test_driver_phases.py` | 104 | Writer prompt assembly (segment ordering, goal/rubric block), adapter path isolation, tier-based driver execution, retry artifact inlining, CLI defaults |
 | `test_pipeline_approvals.py` / `_liveness.py` | 13 | Incremental approval parsing, process liveness checks, heartbeat staleness |
@@ -279,7 +279,7 @@ python3 -m unittest discover -s tests -p "test_*.py" -v
 | `test_v7_split.py` | 21 | Subagent split preconditions, grafting, child artifact concatenation |
 | `test_eval_harness.py` | 15 | Task benchmarks, call role tagging, budget verification |
 | `test_gptme_adapter.py` / `test_searxng_tool.py` | 33 | Adapter execution, stream metadata preservation, SearXNG search tool integration |
-| `test_agent_worker.py` | 17 | claude/codex → gptme-trace translation, cap, drop/passthrough rules, worker exit-code forwarding (2026-08-13) |
+| `test_agent_worker.py` | 19 | claude/codex → gptme-trace translation, cap, drop/passthrough rules, worker exit-code forwarding, over-limit-line survival, logdir dedupe (2026-08-13; §D13 2026-08-15) |
 | `test_backends_claude_codex.py` | 25 | ClaudeCode/Codex adapter flags + command/env/deny rules + `--resume` override, factory branches, CLI choices, `add_dirs` + MCP env fallbacks (2026-08-13) |
 | `test_backend_toggle.py` | 17 | Backend override: driver re-read per dispatch + fallback + `backend_override_invalid` event, research gptme remap, dashboard set/get + route + `/backend`, CLI subcommand, new-run validation (2026-08-13) |
 | `test_environment_remote_files.py` | 2 | File cleanup error tolerance |
@@ -616,6 +616,19 @@ One question call per `RUBRIC_DIMENSIONS` entry (7) plus one finalize call, for 
 ## §D0c addendum — 2026-08-10 session record
 
 The 2026-08-10 session shipped §D0b, §D0, §D1, §D2, §D4, §D5 (interim), §D6, §D7, §D10, §D0c — everything in Part VI except §D3 (subsumed by the then-unshipped §B1) and §D8/§D9 (subsumed by §B2/§B3/§A10). 387 tests at session end; the §D0/§D0b fixes were blocking the §B1 ship gate ("a gptme Writer dispatched with `kind="workspace"` can read and patch a file in a real repo") — that gate was unreachable before: the artifact path was never in any prompt, and a relative run_dir made every path resolution wrong the moment the workspace stopped being the run directory itself.
+
+## §D12 The dashboard ingests PDFs raw (P1) — FIXED 2026-08-15
+
+`dashboard/server.py:_read_text_field` (the server-side `@path` resolution for `POST /api/runs`) read the referenced file with `path.read_text(encoding="utf-8", errors="replace")` — no `%PDF` sniff, no pypdf. The CLI path (`pipeline/run_dir.py:read_source_file`) correctly sniffs the magic header and extracts text via pypdf, so the two surfaces disagreed about what a PDF *is*. Observed live on a 129.8 MB / ~4.4M-token textbook run started from the dashboard: `source.txt` was the raw PDF bytes (`%PDF-1.6\n%����\n2 0 obj…`), the survey chunked the binary (`chunks.jsonl` 250 MB), `spine.json` labels were mojibake ("Y��M� rd�w�QJ�"), and the materialized `spine/<unit>.md` files were PDFs — the Writer agent "couldn't read PDFs" because every file it was handed *was* a PDF, and the model's `read` of a 129 MB binary chunk produced the >64 MB stdout line behind §D13. Worse, this is the self-confirming failure mode §D0's case C warned about: the run "worked", just on garbage. **Fix:** PDF detection extracted into `pipeline/run_dir.py:looks_like_pdf(path)` (extension **or** `%PDF` magic header — a `.md`-named file whose bytes are a PDF is still a PDF, which is exactly what the poisoned spine produced), used by both `read_source_file` and `_read_text_field`; a PDF path in the dashboard now routes through `read_source_file` (pypdf extraction, lazy import). A scanned/no-text PDF raises `ValueError` inside the existing lenient catch and returns `""` — it must never fall back to the raw-bytes read. Verified against the real file: `~/Downloads/atkins.pdf` (80 MB) extracts to 3.5M chars of clean text starting "FUNDAMENTAL CONSTANTS…". Failing-first: `test_read_text_field_extracts_pdf` and `test_read_text_field_sniffs_pdf_magic_header` (a `.md`-named file with `%PDF` bytes) — both asserted `assertNotIn("%PDF", res)` and failed against the old raw read. **The poisoned run cannot be saved by resume:** `source.txt` is protected on resume (§11.9) and the spine is already materialized from it — the run must be deleted and restarted with `@~/Downloads/atkins.pdf`.
+
+## §D13 The cli/codex/opencode worker crashes on an over-limit stdout line, and repeats "session started" (P1) — FIXED 2026-08-15
+
+Two defects in `adapters/_agent_worker.py`, both observed live on the §D12 run (the model's `read` of a 129 MB binary spine chunk produced a CLI record beyond the 64 MB line ceiling):
+
+1. **An over-limit line kills the episode.** `asyncio.StreamReader.readline()` converts an over-limit `LimitOverrunError` into a plain `ValueError` (after clearing its buffer) — the worker's `_pump` caught only `asyncio.LimitOverrunError`, so the `ValueError` escaped `_pump`, crashed the worker with a traceback, and failed the episode. Every retry then spawned a fresh worker — which is also why the chat appeared to "spam session started".
+2. **One "session started" entry per agent step.** `translate_opencode` emits a `logdir` trace line for every `step-start` record (the opencode CLI emits one per step); a single episode's trace carried 8 identical `logdir` lines for one node, each rendering as "session started (logdir=…)" in the Chat tab.
+
+**Fixes:** (1) `_pump` catches `(asyncio.LimitOverrunError, ValueError)` and drops the pathological line — the buffer was already cleared by `readline`, so reading continues and the episode survives; the ceiling stays 64 MB, now overridable via `KUSUDAEMON_WORKER_MAX_LINE_BYTES` so the end-to-end test can exercise the drop path cheaply. (2) `_pump` dedupes emitted `logdir` lines by exact `(logdir, session_id)` pair: the worker's bootstrap line (no session_id) and the first session-bearing `step-start` are the only two kept; repeats are dropped. Failing-first: `test_worker_survives_over_limit_line` (a 4 KB line against a 1 KB ceiling must not crash the worker; the following line still streams, exit code still forwards) and `test_worker_dedupes_repeated_step_start_logdir_lines` (3 step-starts → exactly 2 `logdir` lines) — both failed before the fixes.
 
 ---
 

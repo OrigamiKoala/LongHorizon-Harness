@@ -161,7 +161,7 @@ _ESTIMATE_SYSTEM_PROMPT = (
 )
 
 
-def _work_digest(work: WorkObject, *, outline_limit: int = 200) -> str:
+def _work_digest(work: WorkObject, *, outline_limit: int = 40) -> str:
     lines = [f"work kind: {work.kind}", f"files: {work.files}, est_tokens: {work.est_tokens}"]
     if work.top_dirs:
         lines.append("top-level directories by size:")
