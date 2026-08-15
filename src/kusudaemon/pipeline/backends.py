@@ -29,6 +29,7 @@ from ..adapters.capabilities import (
     translate_tools_to_claude_disallowed,
     translate_tools_to_opencode_permissions,
 )
+from ..adapters.antigravity import AntigravityAdapter
 from ..adapters.claude_code import ClaudeCodeAdapter
 from ..adapters.codex import CodexAdapter
 from ..adapters.gptme_adapter import DEFAULT_TOOL_ALLOWLIST, GptmeAdapter
@@ -38,7 +39,7 @@ from ..v1.tree import TaskNode
 from ..v4.mcp_research import allowed_tools_for
 from ..v4.research import ResearchQuery, normalize_probe_kind, research_raw_finding_path
 
-BACKENDS = WRITER_BACKENDS = ("gptme", "claude", "codex", "opencode")
+BACKENDS = WRITER_BACKENDS = ("gptme", "claude", "codex", "opencode", "antigravity")
 
 # PLAN.md §D2: the run's own bookkeeping, off limits to every Writer's
 # prompt — including "out/" and "scratch/" themselves, which hold every
@@ -299,6 +300,28 @@ def build_writer_adapter(
             hidden_path_exceptions=exceptions,
         )
 
+    if backend in ("antigravity", "agy"):
+        if node is not None and node.budget.tokens:
+            emit_capability_event(
+                run_dir,
+                node_id,
+                "antigravity",
+                "context_length",
+                "Antigravity does not support context window restriction",
+            )
+        resolved_mcp = mcp_config or (str(settings.extra.get("mcp_config")) if settings.extra.get("mcp_config") else None)
+        effort = str(settings.extra.get("effort")) if settings.extra.get("effort") else None
+        return AntigravityAdapter(
+            model=settings.model,
+            api_key=settings.api_key or None,
+            effort=effort,
+            workspace_path=workspace,
+            prompt_dir=prompts,
+            mcp_config=resolved_mcp,
+            hidden_paths=hidden,
+            hidden_path_exceptions=exceptions,
+        )
+
     raise ValueError(f"unknown backend: {backend!r}")
 
 
@@ -411,6 +434,18 @@ def build_research_adapter(
             hidden_path_exceptions=exceptions,
         )
 
+    if backend in ("antigravity", "agy"):
+        effort = str(settings.extra.get("effort")) if settings.extra.get("effort") else None
+        return AntigravityAdapter(
+            model=settings.model,
+            api_key=settings.api_key or None,
+            effort=effort,
+            workspace_path=workspace,
+            prompt_dir=prompts,
+            hidden_paths=hidden,
+            hidden_path_exceptions=exceptions,
+        )
+
     raise ValueError(f"unknown backend: {backend!r}")
 
 
@@ -498,6 +533,18 @@ def build_role_adapter(
             workspace_path=str(scratch_workspace),
             prompt_dir=str(prompt_dir),
             permissions=perms,
+            hidden_paths=hidden,
+        )
+
+    if backend in ("antigravity", "agy"):
+        effort = str(settings.extra.get("effort")) if settings.extra.get("effort") else None
+        return AntigravityAdapter(
+            model=settings.model,
+            api_key=settings.api_key or None,
+            effort=effort,
+            sandbox=True,
+            workspace_path=str(scratch_workspace),
+            prompt_dir=str(prompt_dir),
             hidden_paths=hidden,
         )
 

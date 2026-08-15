@@ -130,15 +130,15 @@ DEFAULT_API_KEY_ENV = "OPENAI_API_KEY"
 DEFAULT_BASE_URL = "https://opencode.ai/zen/v1"
 DEFAULT_MODEL = "opencode/deepseek-v4-flash-free"
 
-SUPPORTED_BACKENDS = ("gptme", "claude", "codex", "opencode")
-# The three CLI-driven backends: each brings its own vendor auth, so a
+SUPPORTED_BACKENDS = ("gptme", "claude", "codex", "opencode", "antigravity")
+# The CLI-driven backends: each brings its own vendor auth, so a
 # "providers" (or "provider") key under any of them is a configuration
 # mistake, not an alternate shape -- read_config_file() rejects it loudly.
-_CLI_BACKENDS = ("claude", "codex", "opencode")
+_CLI_BACKENDS = ("claude", "codex", "opencode", "antigravity")
 
 # The sample config a user gets on first run (and provider.example.json at
 # the repo root, kept in sync by a comment there): gptme's default endpoint
-# and model behind a named provider, and the three CLI backends left
+# and model behind a named provider, and the CLI backends left
 # unconfigured (they use their own login / CLI-side auth until a model is
 # set here).
 SAMPLE_SETTINGS = {
@@ -163,6 +163,10 @@ SAMPLE_SETTINGS = {
     },
     "opencode": {
         "model": DEFAULT_MODEL,
+        "role_model": None,
+    },
+    "antigravity": {
+        "model": "gemini-3.7-flash",
         "role_model": None,
     },
     "roles": {
@@ -570,6 +574,16 @@ def read_backend_config(
             if k not in ("model", "role_model", "base_url", "api_key_env", "models")
         }
         declared_models = list_models_for_backend("codex", target)
+
+    elif name in ("antigravity", "agy"):
+        raw_m = block.get("role_model" if for_role and block.get("role_model") else "model")
+        cfg_model = str(raw_m).strip() if raw_m else None
+        cfg_api_key_env = str(block.get("api_key_env") or "GEMINI_API_KEY")
+        cfg_extra = {
+            k: v for k, v in block.items()
+            if k not in ("model", "role_model", "api_key_env", "models")
+        }
+        declared_models = list_models_for_backend("antigravity", target)
 
     # Precedence resolution
     # 1. API key

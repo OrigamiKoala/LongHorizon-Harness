@@ -57,8 +57,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--backend",
         default="gptme",
-        choices=("gptme", "claude", "codex", "opencode"),
-        help="Subagent backend: gptme (default), claude (Claude Code CLI), codex (Codex CLI), opencode (OpenCode CLI). The CLI backends use their own auth, never the harness provider.",
+        choices=("gptme", "claude", "codex", "opencode", "antigravity", "agy"),
+        help="Subagent backend: gptme (default), claude (Claude Code CLI), codex (Codex CLI), opencode (OpenCode CLI), antigravity (Antigravity CLI). The CLI backends use their own auth, never the harness provider.",
     )
     parser.add_argument("--model", default=None, help="Provider model; defaults to the provider config (default: opencode's DeepSeek V4 Flash Free).")
     parser.add_argument(

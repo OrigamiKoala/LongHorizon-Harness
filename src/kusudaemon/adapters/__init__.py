@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from .antigravity import AntigravityAdapter
     from .base import AgentAdapter
     from .claude_code import ClaudeCodeAdapter
     from .codex import CodexAdapter
@@ -13,6 +14,7 @@ if TYPE_CHECKING:
 
 _LAZY_EXPORTS = {
     "AgentAdapter": ".base",
+    "AntigravityAdapter": ".antigravity",
     "ClaudeCodeAdapter": ".claude_code",
     "CodexAdapter": ".codex",
     "GptmeAdapter": ".gptme_adapter",
@@ -21,6 +23,7 @@ _LAZY_EXPORTS = {
 
 __all__ = [
     "AgentAdapter",
+    "AntigravityAdapter",
     "ClaudeCodeAdapter",
     "CodexAdapter",
     "GptmeAdapter",

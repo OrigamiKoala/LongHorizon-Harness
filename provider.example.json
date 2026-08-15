@@ -29,5 +29,13 @@
       "opencode/deepseek-v4-flash-free",
       "opencode/qwen3-coder"
     ]
+  },
+  "antigravity": {
+    "model": "gemini-3.7-flash",
+    "role_model": null,
+    "models": [
+      "gemini-3.7-flash",
+      "gemini-3.1-pro"
+    ]
   }
 }

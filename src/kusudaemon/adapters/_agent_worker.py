@@ -74,6 +74,8 @@ from typing import Any
 CLAUDE = "claude"
 CODEX = "codex"
 OPENCODE = "opencode"
+ANTIGRAVITY = "antigravity"
+AGY = "agy"
 
 # §D13: an over-limit stdout line must drop, not crash the episode. The
 # env override exists so the end-to-end test can exercise the drop path
@@ -122,6 +124,12 @@ _OPENCODE_TYPES = {
     "tool_result",
     "error",
     "message.part.updated",
+}
+_ANTIGRAVITY_EVENTS = {
+    "init",
+    "step_update",
+    "result",
+    "error",
 }
 
 
@@ -434,6 +442,98 @@ def translate_opencode(record: dict[str, Any], session_dir: str) -> list[str] | 
 
 
 # ----------------------------------------------------------------------------
+# Google Antigravity (agy --print - --output-format stream-json)
+# ----------------------------------------------------------------------------
+
+
+def translate_antigravity(record: dict[str, Any], session_dir: str) -> list[str] | None:
+    """One Antigravity stream-json record → trace lines, or None to drop the line."""
+    event = record.get("event")
+    if event == "init":
+        conversation_id = str(record.get("conversation_id") or "")
+        init_data = record.get("init") if isinstance(record.get("init"), dict) else {}
+        payload: dict[str, Any] = {
+            "type": "logdir",
+            "logdir": session_dir,
+            "session_id": conversation_id,
+        }
+        model = init_data.get("model")
+        if model:
+            payload["model"] = str(model)
+        return [json.dumps(payload)]
+
+    if event == "step_update":
+        update = record.get("step_update") if isinstance(record.get("step_update"), dict) else {}
+        stype = update.get("step_type")
+        state = update.get("state")
+
+        if stype == "tool":
+            tool_name = str(update.get("tool_name") or (update.get("tool_info") or {}).get("name") or "tool")
+            tool_info = update.get("tool_info") if isinstance(update.get("tool_info"), dict) else {}
+            if state == "ACTIVE":
+                params = tool_info.get("parameters")
+                if params is not None:
+                    content = f"tool_use {tool_name}: {_cap(_compact(params))}"
+                else:
+                    content = f"tool_use {tool_name}"
+                return [json.dumps({"type": "message", "role": "tool", "content": content})]
+            elif state == "DONE":
+                out = tool_info.get("output") if "output" in tool_info else update.get("output")
+                if out is not None:
+                    text_out = out if isinstance(out, str) else _compact(out)
+                    return [
+                        json.dumps(
+                            {"type": "message", "role": "tool", "content": f"tool_result: {_cap(text_out)}"}
+                        )
+                    ]
+                return None
+            return None
+
+        if stype == "agent_response":
+            text = str(update.get("text_delta") or update.get("text") or update.get("content") or "").strip()
+            if text:
+                return [json.dumps({"type": "message", "role": "assistant", "content": text})]
+            return None
+
+        if stype in ("thinking", "reasoning"):
+            thought = str(
+                update.get("thought")
+                or update.get("thinking")
+                or update.get("reasoning")
+                or update.get("content")
+                or update.get("text")
+                or ""
+            ).strip()
+            if thought:
+                return [json.dumps({"type": "thinking", "content": thought})]
+            return None
+
+        if stype == "error":
+            msg = str(update.get("error") or update.get("message") or "")
+            if msg:
+                return [json.dumps({"type": "message", "role": "system", "content": f"Error: {msg}"})]
+            return None
+
+        return None
+
+    if event == "result":
+        res = record.get("result") if isinstance(record.get("result"), dict) else {}
+        status = res.get("status")
+        if status == "ERROR":
+            err = res.get("error") or res.get("response") or "Antigravity execution failed"
+            return [json.dumps({"type": "message", "role": "system", "content": f"Error: {err}"})]
+        return None
+
+    if event == "error":
+        msg = str(record.get("error") or record.get("message") or "")
+        if msg:
+            return [json.dumps({"type": "message", "role": "system", "content": f"Error: {msg}"})]
+        return None
+
+    return None
+
+
+# ----------------------------------------------------------------------------
 # Dispatch
 # ----------------------------------------------------------------------------
 
@@ -465,6 +565,10 @@ def translate_line(line: str, fmt: str, session_dir: str = "") -> list[str] | No
         if record.get("type") not in _OPENCODE_TYPES:
             return [line]
         return translate_opencode(record, session_dir)
+    if fmt in (ANTIGRAVITY, AGY):
+        if record.get("event") not in _ANTIGRAVITY_EVENTS:
+            return [line]
+        return translate_antigravity(record, session_dir)
     return [line]
 
 
@@ -523,7 +627,7 @@ async def _run(fmt: str, command: list[str], session_dir: str) -> int:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--format", required=True, choices=(CLAUDE, CODEX, OPENCODE))
+    parser.add_argument("--format", required=True, choices=(CLAUDE, CODEX, OPENCODE, ANTIGRAVITY, AGY))
     args, rest = parser.parse_known_args()
     # parse_known_args leaves a standalone "--" in the positional list
     # (a known argparse quirk); it's the separator, not part of the command.

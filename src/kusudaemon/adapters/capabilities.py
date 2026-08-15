@@ -54,6 +54,25 @@ CANONICAL_TO_OPENCODE: dict[str, tuple[str, ...]] = {
     str(WORKSPACE_READ_TOOL_PATH): ("read",),
 }
 
+# Canonical tool names to Antigravity tool names
+CANONICAL_TO_ANTIGRAVITY: dict[str, tuple[str, ...]] = {
+    "read": ("view_file", "list_dir", "grep_search"),
+    "write": ("write_to_file", "replace_file_content", "multi_replace_file_content"),
+    "edit": ("replace_file_content", "multi_replace_file_content", "write_to_file"),
+    "save": ("write_to_file",),
+    "patch": ("replace_file_content", "multi_replace_file_content"),
+    "shell": ("run_command",),
+    "bash": ("run_command",),
+    "websearch": ("search_web", "read_url_content"),
+    "web_search": ("search_web", "read_url_content"),
+    "web": ("search_web", "read_url_content"),
+    "list": ("list_dir", "grep_search"),
+    "grep": ("grep_search",),
+    "glob": ("list_dir",),
+    str(SEARXNG_TOOL_PATH): ("search_web", "read_url_content"),
+    str(WORKSPACE_READ_TOOL_PATH): ("view_file", "list_dir", "grep_search"),
+}
+
 
 @dataclass(frozen=True)
 class BackendCapabilities:
@@ -92,6 +111,22 @@ CAPABILITIES: dict[str, BackendCapabilities] = {
     ),
     "opencode": BackendCapabilities(
         name="opencode",
+        supports_context_length=False,
+        supports_tool_allowlist=True,
+        supports_tool_denylist=True,
+        supports_path_deny=True,
+        supports_web_search=True,
+    ),
+    "antigravity": BackendCapabilities(
+        name="antigravity",
+        supports_context_length=False,
+        supports_tool_allowlist=True,
+        supports_tool_denylist=True,
+        supports_path_deny=True,
+        supports_web_search=True,
+    ),
+    "agy": BackendCapabilities(
+        name="agy",
         supports_context_length=False,
         supports_tool_allowlist=True,
         supports_tool_denylist=True,

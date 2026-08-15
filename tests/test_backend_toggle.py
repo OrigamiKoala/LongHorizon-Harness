@@ -194,6 +194,17 @@ class ResearchBackendTest(unittest.TestCase):
         )
         self.assertIsInstance(adapter, OpenCodeAdapter)
 
+    def test_antigravity_backend_research_adapter(self) -> None:
+        from kusudaemon.adapters.antigravity import AntigravityAdapter
+
+        adapter = build_research_adapter(
+            "antigravity",
+            workspace_path="/tmp/ws",
+            prompt_dir="/tmp/prompts",
+            query=ResearchQuery(slug="p1", kind="web", question="q"),
+        )
+        self.assertIsInstance(adapter, AntigravityAdapter)
+
     def test_unknown_backend_raises(self) -> None:
         with self.assertRaises(ValueError):
             build_research_adapter(
@@ -204,7 +215,7 @@ class ResearchBackendTest(unittest.TestCase):
             )
 
     def test_doc_retrieval_still_raises_for_any_backend(self) -> None:
-        for backend in ("gptme", "claude", "codex", "opencode"):
+        for backend in ("gptme", "claude", "codex", "opencode", "antigravity"):
             with self.assertRaises(ValueError):
                 build_research_adapter(
                     backend,

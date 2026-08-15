@@ -1139,7 +1139,7 @@ function renderHeaderRow() {
   // backend_override || run.spec.json's backend || gptme; changing it
   // writes backend_override.json, which the driver re-reads at every
   // dispatch (no resume needed). "default" clears the override.
-  const _BACKENDS = ["gptme", "claude", "codex", "opencode"];
+  const _BACKENDS = ["gptme", "claude", "codex", "opencode", "antigravity"];
   const effectiveBackend = snap.backend_override || snap.backend || "gptme";
   const backendSel = snap.control_enabled ? el("select", {
     class: "hdr-backend-sel",

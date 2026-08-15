@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import pytest
 
+from kusudaemon.adapters.antigravity import AntigravityAdapter
 from kusudaemon.adapters.claude_code import ClaudeCodeAdapter
 from kusudaemon.adapters.codex import CodexAdapter
 from kusudaemon.adapters.opencode import OpenCodeAdapter
@@ -22,6 +23,12 @@ def test_build_role_adapter_matrix(tmp_path: Path):
     assert opencode_adapter.workspace_path == str(run_dir / "tmp" / "roles" / "classify")
     assert "OPENCODE_PERMISSION" in opencode_adapter._env_prefix
     assert "deny" in opencode_adapter._env_prefix
+
+    # antigravity
+    antigravity_adapter = build_role_adapter("antigravity", run_dir=run_dir, phase="classify")
+    assert isinstance(antigravity_adapter, AntigravityAdapter)
+    assert antigravity_adapter.workspace_path == str(run_dir / "tmp" / "roles" / "classify")
+    assert "--sandbox" in antigravity_adapter.command_template
 
     # claude
     claude_adapter = build_role_adapter("claude", run_dir=run_dir, phase="plan")

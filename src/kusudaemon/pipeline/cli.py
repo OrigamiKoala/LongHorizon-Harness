@@ -67,7 +67,7 @@ def build_pipeline_parser() -> argparse.ArgumentParser:
         "(PLAN.md §A3 kind=\"workspace\") instead of a materialized corpus.",
     )
     run_parser.add_argument(
-        "--backend", default="gptme", choices=("gptme", "claude", "codex", "opencode")
+        "--backend", default="gptme", choices=("gptme", "claude", "codex", "opencode", "antigravity", "agy")
     )
     run_parser.add_argument("--model", default=None)
     run_parser.add_argument("--provider", default=None)
@@ -209,10 +209,10 @@ def build_pipeline_parser() -> argparse.ArgumentParser:
     # POST /api/backend does — an invalid backend is a clean argparse
     # exit-2 error here, never a crash later.
     backend_parser = sub.add_parser(
-        "backend", help="Set subagent backend override (gptme|claude|codex|opencode)."
+        "backend", help="Set subagent backend override (gptme|claude|codex|opencode|antigravity)."
     )
     backend_parser.add_argument("run_id")
-    backend_parser.add_argument("backend", choices=("gptme", "claude", "codex", "opencode", "none", "default"))
+    backend_parser.add_argument("backend", choices=("gptme", "claude", "codex", "opencode", "antigravity", "agy", "none", "default"))
     backend_parser.add_argument("--runs-root", default=_RUNS_ROOT_DEFAULT)
     return parser
 
