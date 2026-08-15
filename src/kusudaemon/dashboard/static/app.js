@@ -284,6 +284,7 @@ function snapshotFingerprint(snap) {
     snap.tier, snap.measured_tier, snap.tier_override,
     (snap.escalation_history || []).length,
     sig(snap.tree_counts, ["passed", "failed", "blocked", "pending", "ready", "dispatched", "awaiting_review", "stale", "split"]),
+    (snap.tree || []).filter((n) => n.status === "blocked").map((n) => n.id).join(","),
     snap.events_count, lastEv ? `${lastEv.ts}|${lastEv.type}|${lastEv.node_id || ""}` : "",
     subs, pend, apps, jobs, runs,
     snap.halted ? "H" : "", snap.hosted_count,
@@ -1358,6 +1359,17 @@ function renderCenterStream() {
     snap.control_enabled ? el("button", { class: "btn-tiny", onclick: () => guarded(resumeRun) }, "▶ Resume") : null,
   ]) : null;
 
+  // §2026-08-15: blocked nodes are the run's "waiting on you" state even
+  // while other nodes are still dispatching — a persistent amber banner
+  // pinned above the feed, not only the parked feed card. Each id is
+  // clickable straight into the node (its Gates tab shows the verdict).
+  const tc = snap.tree_counts || {};
+  const blockedNodes = (snap.tree || []).filter((n) => n.status === "blocked");
+  const blockedBanner = (tc.blocked || 0) > 0 ? el("div", { class: "stalled-banner", style: "background: rgba(245, 158, 11, 0.10); border-color: rgba(245, 158, 11, 0.55); color: var(--accent-amber); animation: none;" }, [
+    el("span", { style: "font-weight:800;" }, `⊘ ${tc.blocked} BLOCKED`),
+    el("span", { class: "dim", style: "flex:1; display:flex; flex-wrap:wrap; gap:4px 10px; min-width:0;" }, blockedNodes.map((n) => el("span", { class: "node-link", style: "color:var(--accent-amber);", onclick: () => openNode(n.id, "gates") }, n.id))),
+  ]) : null;
+
   const feed = el("div", { class: "chat-feed", id: "chat-feed" }, feedEntries.map((e) => e.node));
   // §scroll: the feed pins to the newest entry until the operator scrolls
   // up; morphing preserves the element (and scrollTop) across ticks, so the
@@ -1373,6 +1385,7 @@ function renderCenterStream() {
       el("button", { class: "btn-tiny", onclick: () => apiGet("/api/snapshot").then(applySnapshot).catch(() => {}) }, "refresh"),
     ]),
     stalledBanner,
+    blockedBanner,
     pinnedHeader,
     feed,
   ]);
@@ -2230,11 +2243,22 @@ function buildNodeTreeIndex() {
     let key = "";
     for (let i = 1; i <= parts.length; i++) {
       key = parts.slice(0, i).join(".");
-      if (!(key in index)) { index[key] = { id: key, children: [], node: null }; order.push(key); }
+      if (!(key in index)) {
+        index[key] = { id: key, children: [], node: null };
+        order.push(key);
+        // 2026-08-15: attach every segment (folder or leaf) to its parent
+        // here, inside the prefix loop. Before, only full node ids were
+        // attached — an intermediate folder whose exact id has no node row
+        // (e.g. `c03.simple-mixtures-thermo` when only
+        // `c03.simple-mixtures-thermo.<leaf>` nodes exist) was orphaned,
+        // and every subtree deeper than one level rendered as an empty
+        // folder in the task tree (observed live on a T3 textbook run:
+        // c03–c07 all showed no children despite passed leaves).
+        const parentKey = parts.slice(0, i - 1).join(".");
+        if (parentKey && index[parentKey]) index[parentKey].children.push(key);
+      }
     }
     index[key].node = n;
-    const parentKey = parts.slice(0, -1).join(".");
-    if (parentKey && index[parentKey]) index[parentKey].children.push(key);
   }
   // top-level = no parent claim
   const tops = order.filter((k) => !k.includes(".") || !index[k.split(".").slice(0, -1).join(".")]);

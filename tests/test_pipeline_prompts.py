@@ -1,9 +1,10 @@
 """Tests for pipeline/prompts.py's build_node_prompt.
 
 No network, no provider — pure prompt assembly. Covers PLAN-zeromem.md §9's
-feedback-carrying retry block: absent on a first attempt, patch-framed on a
-retry, regenerate-framed once patching has already failed once; §11.2's
-depends_on promotion injection; and §11.4's contract caching.
+feedback-carrying retry block: absent on a first attempt, patch-framed on
+every in-place retry, regenerate-framed only for an operator redispatch
+(§D31); §11.2's depends_on promotion injection; and §11.4's contract
+caching.
 """
 
 from __future__ import annotations
@@ -57,12 +58,38 @@ class BuildNodePromptTest(unittest.TestCase):
         self.assertIn("MINIMAL", prompt)
         self.assertNotIn("Rewrite the artifact from scratch", prompt)
 
-    def test_attempt_three_uses_regenerate_framing(self) -> None:
+    def test_attempt_three_still_uses_patch_framing(self) -> None:
+        # §D31 (2026-08-15): an in-place retry is always patch-framed —
+        # mid-series regenerate framing burned the remaining attempts on a
+        # fresh artifact that had to re-clear the same gates, and observed
+        # retries got faster each time, not more thorough.
         node = _node(attempts=2, last_defect="nonempty: artifact is empty")
+        with tempfile.TemporaryDirectory() as run_dir:
+            prompt = build_node_prompt(node, run_dir)
+        self.assertIn("MINIMAL", prompt)
+        self.assertNotIn("Rewrite the artifact from scratch", prompt)
+
+    def test_operator_redispatch_uses_regenerate_framing(self) -> None:
+        # §D31: the only case a rewrite is warranted is an operator
+        # redispatch — the node exhausted its series and was reset to a
+        # fresh budget (state.py's redispatch job stamps this prefix). No
+        # prior-artifact inline: a from-scratch rewrite would only be
+        # tempted to patch it.
+        node = _node(attempts=0, last_defect="redispatch requested by operator: review never passed")
         with tempfile.TemporaryDirectory() as run_dir:
             prompt = build_node_prompt(node, run_dir)
         self.assertIn("Rewrite the artifact from scratch", prompt)
         self.assertNotIn("MINIMAL", prompt)
+        self.assertNotIn("fix it in place", prompt)
+
+    def test_redispatch_failure_returns_to_patch_framing(self) -> None:
+        # A failure *within* the redispatched series is an ordinary retry
+        # again — last_defect is the reviewer's defects, attempts start at 1.
+        node = _node(attempts=1, last_defect="clarity: still unclear")
+        with tempfile.TemporaryDirectory() as run_dir:
+            prompt = build_node_prompt(node, run_dir)
+        self.assertIn("MINIMAL", prompt)
+        self.assertNotIn("Rewrite the artifact from scratch", prompt)
 
     # A6-5 (IMPLEMENTATION-PLAN-COST-AND-LIVE.md): a retry is a fresh
     # subprocess that would otherwise re-read every input, including a

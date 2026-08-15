@@ -21,12 +21,14 @@ reviewer recursion is explicitly rejected").
 
 from __future__ import annotations
 
+import copy
 import re
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from ..roles.protocol import RoleProvider
 from .gates import estimate_tokens
+from .provider import ProviderError
 from .tree import TaskNode
 
 # §11.10.13: the reviewer's input side gets the §8 "small outputs
@@ -47,6 +49,16 @@ MAX_FANOUT_SECTIONS = 6
 # independent: v1 is the base layer here and must not import from v2.
 _MD_HEADING_RE = re.compile(r"(?m)^(#{1,6})[ \t]+\S.*$")
 
+# §D30 (2026-08-15): the primary defect cap. 300 was repeatedly exceeded by
+# real "scoped, located" defects carrying math notation (e.g. "…but the
+# evaluation of the non-trivial Gaussian integral ∫₋∞^∞ e^(−mvx²/2kT)dvx
+# that yields it is never shown." ≈ 330 chars) — 400 fits the observed
+# natural length while keeping reviewer outputs small (invariant 7). The
+# relaxed fallback cap below is the harness revising its own constraint,
+# not a model override.
+DEFECT_MAXLENGTH = 400
+RELAXED_DEFECT_MAXLENGTH = 600
+
 VERDICT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "required": ["items", "verdict"],
@@ -61,7 +73,7 @@ VERDICT_SCHEMA: dict[str, Any] = {
                 "properties": {
                     "id": {"type": "string"},
                     "pass": {"type": "boolean"},
-                    "defect": {"type": "string", "maxLength": 300},
+                    "defect": {"type": "string", "maxLength": DEFECT_MAXLENGTH},
                     "class": {"type": "string", "enum": ["patchable", "regenerate"]},
                     "node_ids": {"type": "array", "items": {"type": "string"}},
                 },
@@ -204,12 +216,33 @@ def _call_reviewer(
             "content": f"Rubric:\n{rubric_lines}\n\nArtifact:\n{artifact_text}",
         },
     ]
-    return provider.complete_json(
-        messages,
-        VERDICT_SCHEMA,
-        temperature=temperature,
-        on_reasoning=on_reasoning,
-    )
+    try:
+        return provider.complete_json(
+            messages,
+            VERDICT_SCHEMA,
+            temperature=temperature,
+            on_reasoning=on_reasoning,
+        )
+    except ProviderError as exc:
+        # §D30 (2026-08-15): a defect longer than the schema's maxLength
+        # must degrade, never kill the run. When the host rejects
+        # `response_format` (the A4-1 latch), `complete_json` enforces the
+        # schema itself and raises after 3 reprompts — observed live with
+        # exactly the "longer than maxLength 300" error above. Retry once
+        # against a copy of the schema with a relaxed defect cap so the
+        # verdict lands and the node transitions normally (same
+        # degrade-don't-die convention as A4-1). Anything else propagates.
+        if "maxLength" not in str(exc):
+            raise
+        relaxed = copy.deepcopy(VERDICT_SCHEMA)
+        defect = relaxed["properties"]["items"]["items"]["properties"]["defect"]
+        defect["maxLength"] = RELAXED_DEFECT_MAXLENGTH
+        return provider.complete_json(
+            messages,
+            relaxed,
+            temperature=temperature,
+            on_reasoning=on_reasoning,
+        )
 
 
 def review_node(

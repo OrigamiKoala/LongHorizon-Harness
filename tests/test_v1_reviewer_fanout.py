@@ -14,14 +14,17 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+from typing import Any
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO_ROOT / "src"))
 
 from kusudaemon.v1.gates import estimate_tokens  # noqa: E402
+from kusudaemon.v1.provider import ProviderError  # noqa: E402
 from kusudaemon.v1.reviewer import (  # noqa: E402
     DEFAULT_ARTIFACT_CAP_TOKENS,
     MAX_FANOUT_SECTIONS,
+    RELAXED_DEFECT_MAXLENGTH,
     cap_artifact_text,
     review_node,
 )
@@ -166,6 +169,60 @@ class PathologicalMegaSectionTest(unittest.TestCase):
         sent = provider.calls[0][0][1]["content"]
         self.assertIn("ARTIFACT TRUNCATED", sent)
         self.assertLessEqual(estimate_tokens(sent), DEFAULT_ARTIFACT_CAP_TOKENS + 50)
+
+
+class DefectOverLengthTest(unittest.TestCase):
+    """§D30 (2026-08-15): a reviewer defect longer than the schema's
+    maxLength must degrade to a relaxed-schema retry, never kill the run.
+
+    When the host rejects ``response_format`` (the A4-1 latch),
+    ``complete_json`` enforces the schema harness-side and raises
+    ``ProviderError`` after 3 reprompts; without a fallback that error
+    propagates out of ``review_node`` and parks the whole run (observed
+    live: ``structured output failed after 3 attempts:
+    $.items[0].defect: longer than maxLength 300``)."""
+
+    def test_over_length_defect_falls_back_to_relaxed_schema(self) -> None:
+        long_defect = "x" * 500
+
+        class FailingFirst(FakeProvider):
+            def __init__(self) -> None:
+                super().__init__(
+                    [
+                        {
+                            "items": [{"id": "clarity", "pass": False, "defect": long_defect}],
+                            "verdict": "fail",
+                        }
+                    ]
+                )
+                self.first_schema: dict[str, Any] | None = None
+
+            def complete_json(self, messages, schema, **kwargs):
+                if self.first_schema is None:
+                    self.first_schema = schema
+                    raise ProviderError(
+                        "structured output failed after 3 attempts: "
+                        "$.items[0].defect: longer than maxLength 300"
+                    )
+                return super().complete_json(messages, schema, **kwargs)
+
+        provider = FailingFirst()
+        verdict = review_node(_node(), "Some artifact.", provider)
+        self.assertEqual(verdict.verdict, "fail")
+        self.assertEqual(verdict.items[0]["defect"], long_defect)
+        # The failed strict call raises before FakeProvider records it, so
+        # the single recorded call must be the relaxed-schema retry.
+        self.assertEqual(len(provider.calls), 1)
+        relaxed = provider.calls[0][1]["properties"]["items"]["items"]["properties"]["defect"]
+        self.assertEqual(relaxed["maxLength"], RELAXED_DEFECT_MAXLENGTH)
+
+    def test_unrelated_provider_error_still_propagates(self) -> None:
+        class Boom(FakeProvider):
+            def complete_json(self, messages, schema, **kwargs):
+                raise ProviderError("provider request failed: <urlopen error timed out>")
+
+        with self.assertRaises(ProviderError):
+            review_node(_node(), "Some artifact.", Boom([]))
 
 
 class ShipGateTailDefectTest(unittest.TestCase):

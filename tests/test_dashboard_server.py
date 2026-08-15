@@ -172,6 +172,40 @@ class DashboardServerTest(_ServerTestCase):
         handler = source[idx : idx + 1000]
         self.assertIn("render();", handler)
 
+    def test_tree_index_attaches_intermediate_folders(self) -> None:
+        """2026-08-15: ``buildNodeTreeIndex`` orphaned intermediate folder
+        segments. The prefix loop created a folder key for every segment of
+        every node id, but only *full node ids* were attached to their
+        parent's ``children`` — so a folder whose exact id had no node row
+        (e.g. ``c03.simple-mixtures-thermo`` when only
+        ``c03.simple-mixtures-thermo.<leaf>`` nodes exist) was never
+        reachable, and every subtree deeper than one level rendered as an
+        empty folder in the task tree (observed live on a T3 textbook run:
+        c03–c07 all showed no children despite passed leaves). The fix
+        attaches each newly-created segment to its parent inside the prefix
+        loop. Source-text regression check, not a DOM test — this repo has
+        no jsdom harness (§9.4's node --check is the only JS gate)."""
+        with urllib.request.urlopen(self._url("/static/app.js")) as resp:
+            source = resp.read().decode("utf-8")
+        tree_fn = source[source.index("function buildNodeTreeIndex") : source.index("function treeRowClass")]
+        self.assertIn("parts.slice(0, i - 1)", tree_fn)
+
+    def test_blocked_banner_renders_persistently(self) -> None:
+        """2026-08-15: blocked nodes are the run's "waiting on you" state
+        even while other nodes still dispatch — a persistent amber banner
+        pinned above the feed, not only the parked feed card. It must
+        filter ``snap.tree`` for ``status === "blocked"``, render the count
+        with the ``⊘`` glyph, and deep-link each node to its Gates tab
+        (§DASHBOARD-UX §10: blocked → jump to the first blocked node's
+        Gates tab, not the tree). Source-text regression check, not a DOM
+        test — this repo has no jsdom harness."""
+        with urllib.request.urlopen(self._url("/static/app.js")) as resp:
+            source = resp.read().decode("utf-8")
+        banner = source[source.index("const blockedNodes =") : source.index("const blockedBanner")]
+        self.assertIn('.filter((n) => n.status === "blocked")', banner)
+        self.assertIn("⊘ ${tc.blocked} BLOCKED", source)
+        self.assertIn('openNode(n.id, "gates")', source)
+
     def test_contract_endpoint_carries_tokens_and_ceiling(self) -> None:
         # §DASHBOARD-UX §5.3: the Doc tab's ceiling bar needs both the
         # measured contract size and the ceiling it was frozen under.

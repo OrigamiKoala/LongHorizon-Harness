@@ -19,10 +19,12 @@ another node will ever see"). No document-order fallback: with
 and a wrong heuristic is worse than nothing (PLAN-zeromem.md §11.2).
 
 Finally, if the node carries a ``last_defect`` from a prior failed attempt
-(PLAN-zeromem.md §9), it's appended as a retry block — patch framing on
-attempt 2, regenerate framing on attempt 3+, mirroring
-``v3/repair.py``'s two ``RepairMode`` framings one layer earlier, before a
-node has ever passed once.
+(PLAN-zeromem.md §9), it's appended as a retry block — always patch framing
+on an in-place retry (a mid-series rewrite burns attempts on a fresh
+artifact that must re-clear the same gates); regenerate framing applies
+only to an operator redispatch, which resets the node to a fresh attempt
+budget and stamps ``last_defect`` with the marker
+``dashboard/state.py``'s redispatch job writes (§D31, 2026-08-15).
 """
 
 from __future__ import annotations
@@ -287,15 +289,26 @@ def segments(
             "delivered — read them before writing):\n" + promotions,
         )
     if node.last_defect:
-        instruction = _PATCH_RETRY_INSTRUCTION if node.attempts <= 1 else _REGENERATE_RETRY_INSTRUCTION
-        retry_block = instruction + node.last_defect
-        prior_artifact = _prior_attempt_artifact(node, run_dir)
-        if prior_artifact is not None:
-            retry_block += (
-                "\n\nYour previous artifact (fix it in place, then save the "
-                f"corrected version over it):\n\n{prior_artifact}"
-            )
-        add("retry", retry_block)
+        # §D31 (2026-08-15): an in-place retry is always patch-framed.
+        # A mid-series "rewrite from scratch" burned the remaining attempts
+        # on a fresh artifact that had to re-clear the same gates, and the
+        # observed retries got *faster* each time, not more thorough.
+        # Regenerate framing applies only to an operator redispatch — a node
+        # that exhausted its series and was reset to a fresh budget
+        # (dashboard/state.py's redispatch job stamps exactly this prefix;
+        # the pre-reset attempt count is not persisted, so the operator's
+        # explicit intervention is the fresh-start judgment call).
+        if node.last_defect.startswith("redispatch requested by operator:"):
+            add("retry", _REGENERATE_RETRY_INSTRUCTION + node.last_defect)
+        else:
+            retry_block = _PATCH_RETRY_INSTRUCTION + node.last_defect
+            prior_artifact = _prior_attempt_artifact(node, run_dir)
+            if prior_artifact is not None:
+                retry_block += (
+                    "\n\nYour previous artifact (fix it in place, then save the "
+                    f"corrected version over it):\n\n{prior_artifact}"
+                )
+            add("retry", retry_block)
     return segs
 
 
