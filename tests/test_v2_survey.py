@@ -106,6 +106,19 @@ class SurveyChunksTest(unittest.TestCase):
         # window 1 covers chunks 8-15 (local 3 -> global 11).
         self.assertEqual(global_indices, [5, 11])
 
+    def test_on_progress_reports_call_and_total(self) -> None:
+        chunks = self._chunks(20)
+        provider = FakeProvider([{"boundaries": []}, {"boundaries": []}, {"boundaries": []}])
+        progress_calls: list[tuple[int, int]] = []
+        survey_chunks(
+            chunks,
+            provider,
+            window_size=8,
+            stride=8,
+            on_progress=lambda cur, tot: progress_calls.append((cur, tot)),
+        )
+        self.assertEqual(progress_calls, [(1, 3), (2, 3), (3, 3)])
+
     def test_fewer_than_two_chunks_makes_no_calls(self) -> None:
         provider = FakeProvider([])
         self.assertEqual(survey_chunks(self._chunks(1), provider), [])

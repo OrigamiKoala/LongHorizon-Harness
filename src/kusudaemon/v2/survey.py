@@ -198,6 +198,7 @@ def survey_chunks(
     stride: int = DEFAULT_WINDOW_STRIDE,
     max_calls: int = DEFAULT_MAX_SURVEY_CALLS,
     on_reasoning: Callable[[str], None] | None = None,
+    on_progress: Callable[[int, int], None] | None = None,
     streaming: bool = False,
 ) -> list[BoundaryVote]:
     """Walk ``chunks`` in overlapping windows of ``window_size`` (advancing
@@ -213,6 +214,18 @@ def survey_chunks(
     votes: list[BoundaryVote] = []
     if len(chunks) < 2:
         return votes
+
+    total_calls = 0
+    s = 0
+    while s < len(chunks) and total_calls < max_calls:
+        w = chunks[s : s + window_size]
+        if len(w) < 2:
+            break
+        total_calls += 1
+        if s + window_size >= len(chunks):
+            break
+        s += stride
+
     start = 0
     calls = 0
     while start < len(chunks):
@@ -222,6 +235,11 @@ def survey_chunks(
         if calls >= max_calls:
             break
         calls += 1
+        if on_progress is not None:
+            try:
+                on_progress(calls, total_calls)
+            except Exception:
+                pass
         messages = [
             {"role": "system", "content": _SURVEY_SYSTEM_PROMPT},
             {"role": "user", "content": _render_window(window)},

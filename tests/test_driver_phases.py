@@ -466,7 +466,8 @@ class ExplorerReasoningTest(unittest.TestCase):
                 lines = [json.loads(line) for line in trace_text.splitlines() if line.strip()]
                 self.assertTrue(lines, "expected at least one reasoning line in explore-01's trace")
                 self.assertTrue(all(line["type"] == "reasoning" for line in lines))
-                self.assertEqual(lines[0]["content"], "weighing where this section ends...")
+                self.assertTrue(any(line["content"] == "weighing where this section ends..." for line in lines))
+                self.assertTrue(any("[Survey Progress]" in line["content"] for line in lines))
 
         asyncio.run(scenario())
 

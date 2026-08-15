@@ -124,3 +124,63 @@ def resolve_runs_root(root: str | Path) -> Path:
 
 def resolve_run_dir(root: str | Path, run_id: str) -> Path:
     return resolve_runs_root(root) / run_id
+
+
+def read_source_file(path: str | Path) -> str:
+    """Safely read text or extract PDF text from path.
+
+    Rejects unextractable PDFs or binary files rather than corrupting
+    source.txt with replacement characters.
+    """
+    p = Path(path).expanduser().resolve()
+    if not p.exists():
+        raise FileNotFoundError(f"file not found: {p}")
+    if not p.is_file():
+        raise ValueError(f"not a file: {p}")
+
+    is_pdf = p.suffix.lower() == ".pdf"
+    if not is_pdf:
+        try:
+            with p.open("rb") as f:
+                header = f.read(5)
+                if header.startswith(b"%PDF"):
+                    is_pdf = True
+        except OSError:
+            pass
+
+    if is_pdf:
+        try:
+            import pypdf
+        except ImportError as exc:
+            raise RuntimeError(
+                f"pypdf is required to extract text from PDF file '{p}'. "
+                "Install it with: pip install pypdf"
+            ) from exc
+        try:
+            reader = pypdf.PdfReader(str(p))
+            pages_text = []
+            for page in reader.pages:
+                extracted = page.extract_text()
+                if extracted:
+                    pages_text.append(extracted)
+            full_text = "\n\n".join(pages_text).strip()
+            if not full_text:
+                raise ValueError(f"PDF file '{p}' contains no extractable text.")
+            return full_text
+        except Exception as exc:
+            if isinstance(exc, (RuntimeError, ValueError)):
+                raise
+            raise ValueError(f"failed to extract text from PDF '{p}': {exc}") from exc
+
+    try:
+        with p.open("rb") as f:
+            chunk = f.read(1024)
+            if b"\x00" in chunk:
+                raise ValueError(f"cannot read binary file '{p}' as text")
+    except OSError as exc:
+        raise OSError(f"cannot read file '{p}': {exc}") from exc
+
+    try:
+        return p.read_text(encoding="utf-8").strip()
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"file '{p}' is not valid UTF-8 text: {exc}") from exc

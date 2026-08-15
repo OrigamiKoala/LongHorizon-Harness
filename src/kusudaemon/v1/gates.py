@@ -79,6 +79,23 @@ def unmet(results: list[GateResult]) -> list[GateResult]:
     return [result for result in results if not result.passed]
 
 
+def _count_words(text: str) -> int:
+    """Count whitespace-delimited words without allocating a list of strings."""
+    if not text:
+        return 0
+    words = 0
+    in_word = False
+    for i in range(0, len(text), 65536):
+        chunk = text[i : i + 65536]
+        for ch in chunk:
+            if ch.isspace():
+                in_word = False
+            elif not in_word:
+                in_word = True
+                words += 1
+    return words
+
+
 def estimate_tokens(text: str) -> int:
     """Whitespace-token heuristic (~1.33 tokens/word for English prose).
 
@@ -86,7 +103,7 @@ def estimate_tokens(text: str) -> int:
     packaging/tomli) — this is an approximation, good enough for a budget
     gate and the promotion cap, not for billing.
     """
-    words = len(text.split())
+    words = _count_words(text)
     return int(words / 0.75) if words else 0
 
 
@@ -124,7 +141,7 @@ def _gate_len(gate: str, arg: str, text: str) -> GateResult:
         low, high = int(low_str), int(high_str)
     except ValueError:
         return GateResult(gate=gate, passed=False, detail=f"malformed range {arg!r}")
-    length = len(text.split())
+    length = _count_words(text)
     passed = low <= length <= high
     detail = "" if passed else f"{length} words, need {low}-{high}"
     return GateResult(gate=gate, passed=passed, detail=detail)

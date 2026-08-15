@@ -1067,11 +1067,17 @@ class RecursiveDriver:
                         if subagent_id
                         else None
                     )
+                    on_progress = (
+                        (lambda cur, tot: self._record_explorer_progress(subagent_id, cur, tot))
+                        if subagent_id
+                        else None
+                    )
                     votes = await asyncio.to_thread(
                         survey_chunks,
                         chunks,
                         self.provider,
                         on_reasoning=on_reasoning,
+                        on_progress=on_progress,
                         streaming=True,
                     )
             finally:
@@ -2168,6 +2174,22 @@ class RecursiveDriver:
         trace_path = ensure_node_trace_path(self.run_dir, node_id)
         with trace_path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps({"type": "reasoning", "content": text}, ensure_ascii=False) + "\n")
+
+    def _record_explorer_progress(self, node_id: str, current: int, total: int) -> None:
+        """Update phase detail and append a progress line to the explorer trace
+        so the operator sees active window progression in both the Phase bar
+        and the Chat/Thinking feeds."""
+        detail = f"survey window {current}/{total}"
+        self._set_phase("explore", "in_progress", detail)
+        trace_path = ensure_node_trace_path(self.run_dir, node_id)
+        with trace_path.open("a", encoding="utf-8") as fh:
+            fh.write(
+                json.dumps(
+                    {"type": "reasoning", "content": f"[Survey Progress] Window {current}/{total}"},
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
 
     def _halted(self) -> bool:
         return halt_path(self.run_dir).exists()
