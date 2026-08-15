@@ -391,11 +391,11 @@ class RequestReopenTest(unittest.TestCase):
         self.assertIsNone(approval)
         self.assertIn("defect", err)
 
-    def test_request_reopen_on_blocked_node_creates_redispatch_approval(self) -> None:
+    def test_request_reopen_on_blocked_node_directly_redispatches(self) -> None:
         # §E23: reopening a node that never passed (blocked/failed/stale)
         # must NOT create a repair approval whose job fails with "node X is
         # 'blocked', not 'passed' — nothing to reopen" (the silent dead-end
-        # observed on a parked T1 run). It routes to a redispatch approval —
+        # observed on a parked T1 run). It routes directly to redispatch —
         # reset + re-dispatch with a fresh attempt budget, the only recovery
         # that can move a never-passed node.
         tree = TaskTree.load(tree_path(self.run_dir))
@@ -409,12 +409,10 @@ class RequestReopenTest(unittest.TestCase):
             last_defect="nonempty: artifact is empty",
         )
         tree.save(tree_path(self.run_dir))
-        approval, err = self.state.request_reopen("3", "the writer 429'd twice")
+        result, err = self.state.request_reopen("3", "the writer 429'd twice")
         self.assertEqual(err, "")
-        self.assertEqual(approval["kind"], "redispatch")
-        self.assertEqual(approval["context"]["node_id"], "3")
-        # applying the approval resets the node to pending with a fresh budget
-        _run_redispatch_job(self.run_dir, approval["approval_id"])
+        self.assertEqual(result["kind"], "redispatch")
+        self.assertEqual(result["node_id"], "3")
         tree = TaskTree.load(tree_path(self.run_dir))
         self.assertEqual(tree.nodes["3"].status, "pending")
         self.assertEqual(tree.nodes["3"].attempts, 0)

@@ -1444,13 +1444,15 @@ function renderCenterStream() {
   const lastEvents = evList.slice(-20).map((ev, i) => ({ sort: ev.ts || 0, node: renderEventEntry(ev, i) }));
   feedEntries.push(...lastEvents);
   // Approvals — pending and resolved alike — are entries of the chat history
-  // itself, sorted into chronological position with everything else.
+  // itself. Pending approvals sort to the very bottom for immediate action.
   const seenApprovalIds = new Set();
   const allApprovals = [];
   for (const a of (snap.pending_approvals || []).concat(snap.approvals || [])) {
     if (!a || !a.approval_id || seenApprovalIds.has(a.approval_id)) continue;
     seenApprovalIds.add(a.approval_id);
-    allApprovals.push({ sort: a.created_at || a.updated_at || 0, node: renderApprovalEntry(a, snap) });
+    const isPending = a.status === "pending";
+    const sortKey = isPending ? Number.MAX_SAFE_INTEGER : (a.resolved_at || a.created_at || a.updated_at || 0);
+    allApprovals.push({ sort: sortKey, node: renderApprovalEntry(a, snap) });
   }
   feedEntries.push(...allApprovals);
   const pendingMsgs = (state.pendingMessages || []).map((m) => ({ sort: m.ts || 0, node: renderPendingEntry(m) }));
@@ -1810,7 +1812,7 @@ async function cmdToggleControl() { /* control flag is server-side */ }
 async function _redispatchAction(nodeId) {
   await apiPost(`/api/node/${encodeURIComponent(nodeId)}/redispatch`, {});
   recordCli("redispatch", nodeId);
-  showToast("Redispatch approval queued");
+  showToast("Node redispatched — queued for execution");
   await refreshSnapshot();
 }
 
@@ -1849,15 +1851,10 @@ function buildCommands() {
         reason = isTreeNode ? split.slice(0, -1).join(" ") : text;
       }
       if (!nodeArg) { showToast("reopen needs a node id (select a node first)", true); return; }
-      // §E23 (2026-08-13): the server routes a never-passed node (blocked/
-      // failed/stale) to a redispatch approval — the response kind tells
-      // the toast the truth instead of the old unconditional "Node reopened"
-      // (which was a lie: an approval was only queued, and for a blocked
-      // node its job then failed invisibly).
       const resp = await apiPost("/api/reopen", { node_id: nodeArg, defect: reason, is_manual: true });
       recordCli("reopen", nodeArg);
       showToast(resp && resp.kind === "redispatch"
-        ? "Node never passed — redispatch approval queued (resume happens on apply)"
+        ? "Node never passed — redispatched and queued for execution"
         : "Reopen approval queued");
       await refreshSnapshot();
     } },
@@ -2019,7 +2016,7 @@ function renderContextMenu() {
   } else if (m.nodeId !== undefined) {
     items.push(el("div", { class: "ctx-item", onclick: () => { state.contextMenu = null; openNode(m.nodeId, "overview"); render(); } }, "node overview"));
     items.push(el("div", { class: "ctx-item", onclick: () => { state.contextMenu = null; openReopen(m.nodeId); render(); } }, "reopen (repair)"));
-    items.push(el("div", { class: "ctx-item", onclick: () => { state.contextMenu = null; render(); guarded(() => apiPost(`/api/node/${encodeURIComponent(m.nodeId)}/redispatch`, {}).then(() => { recordCli("redispatch", m.nodeId); showToast("Redispatch approval queued"); }).then(refreshSnapshot)); } }, "redispatch"));
+    items.push(el("div", { class: "ctx-item", onclick: () => { state.contextMenu = null; render(); guarded(() => apiPost(`/api/node/${encodeURIComponent(m.nodeId)}/redispatch`, {}).then(() => { recordCli("redispatch", m.nodeId); showToast("Node redispatched — queued for execution"); }).then(refreshSnapshot)); } }, "redispatch"));
     items.push(el("div", { class: "ctx-item", onclick: () => { state.contextMenu = null; render(); navigator.clipboard && navigator.clipboard.writeText(m.nodeId).then(() => showToast("copied id")); } }, "copy id"));
   }
   return el("div", { class: "overlay ctx-overlay", onclick: () => { state.contextMenu = null; render(); } }, [

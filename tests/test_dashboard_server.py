@@ -656,7 +656,7 @@ class OperatorActionRoutesTest(_ServerTestCase):
         self.assertEqual(record.answers.get("q-audience"), "engineers")
         self.assertEqual(record.answers.get("q-length"), "")
 
-    def test_redispatch_route_creates_approval_and_apply_resets_node(self) -> None:
+    def test_redispatch_route_directly_resets_node(self) -> None:
         from kusudaemon.v1.run_dir import tree_path
 
         tree = TaskTree(
@@ -669,24 +669,14 @@ class OperatorActionRoutesTest(_ServerTestCase):
         status, payload = self._post("/api/node/3/redispatch", {"reason": "the splitter is ready"})
         self.assertEqual(status, 200)
         self.assertEqual(payload["kind"], "redispatch")
-        approval_id = payload["approval_id"]
+        self.assertEqual(payload["status"], "pending")
 
         # a passed node cannot be redispatched
         status, payload = self._post("/api/node/1/redispatch", {})
         self.assertEqual(status, 400)
 
-        # apply the approval -- the job thread resets the node to pending
-        status, payload = self._post(f"/api/approvals/{approval_id}/resolve", {"action": "apply"})
-        self.assertEqual(status, 200)
-        deadline = 0
-        while deadline < 5:
-            tree = TaskTree.load(tree_path(self.run_dir))
-            if tree.nodes["3"].status == "pending":
-                break
-            import time
-
-            time.sleep(0.05)
-            deadline += 0.05
+        # node is already directly reset to pending on disk
+        tree = TaskTree.load(tree_path(self.run_dir))
         self.assertEqual(tree.nodes["3"].status, "pending")
         self.assertEqual(tree.nodes["3"].attempts, 0)
         self.assertIn("redispatch requested by operator", tree.nodes["3"].last_defect)
