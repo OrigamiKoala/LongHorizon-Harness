@@ -166,8 +166,21 @@ def format_diff_plain(old_text: str, new_text: str, **kwargs: Any) -> str:
 # so failures aren't lost in a wall of routine tool-result text.
 # ----------------------------------------------------------------------
 class TraceEntry(NamedTuple):
-    role: str  # "assistant" | "user" | "system" | "tool" | "tool_call" | "diff" | "error" | "thinking" | "logdir" | "raw"
+    role: str  # "assistant" | "user" | "system" | "tool" | "tool_call" | "diff" | "error" | "thinking" | "logdir" | "raw" | "usage"
     text: str
+    tool_name: str | None = None
+    tool_input: Any | None = None
+    tool_output: str | None = None
+    tool_id: str | None = None
+    exit_code: int | None = None
+    tokens: int | None = None
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    reasoning_tokens: int | None = None
+    cost_usd: float | None = None
+    duration_ms: int | None = None
+    logs: str | None = None
+    extra: dict[str, Any] | None = None
 
 
 ROLE_STYLE: dict[str, str] = {
@@ -180,6 +193,7 @@ ROLE_STYLE: dict[str, str] = {
     "error": "bold red",
     "thinking": "italic magenta",
     "logdir": "dim italic",
+    "usage": "dim green",
     "raw": "dim",
 }
 
@@ -267,7 +281,15 @@ def _emit_assistant_content(entries: list[TraceEntry], content: str, file_state:
             entries.append(TraceEntry("assistant", content[match.start() : match.end()]))
             continue
 
-        entries.append(TraceEntry("tool_call", f"{tool} {arg}".strip()))
+        tool_input_val = body if (tool in _FILE_WRITE_TOOLS or tool == "patch") else (arg or body)
+        entries.append(
+            TraceEntry(
+                "tool_call",
+                f"{tool} {arg}".strip(),
+                tool_name=tool,
+                tool_input=tool_input_val,
+            )
+        )
 
         if tool in _FILE_WRITE_TOOLS and arg:
             # Diff against the on-disk representation (trailing newline
@@ -341,30 +363,129 @@ def parse_trace_lines(raw: str, entries: list[TraceEntry], file_state: dict[str,
         if rtype == "logdir":
             entries.append(TraceEntry("logdir", f"session started (logdir={record.get('logdir', '')})"))
             continue
+        if rtype == "usage":
+            pt = int(record.get("prompt_tokens", 0) or 0)
+            ct = int(record.get("completion_tokens", 0) or 0)
+            rt = int(record.get("reasoning_tokens", 0) or 0)
+            tt = int(record.get("total_tokens", 0) or (pt + ct + rt))
+            cost = record.get("cost_usd")
+            cost_val = float(cost) if cost is not None else None
+            entries.append(
+                TraceEntry(
+                    role="usage",
+                    text=f"Tokens: {tt:,} (prompt: {pt:,}, completion: {ct:,}, reasoning: {rt:,})",
+                    tokens=tt,
+                    prompt_tokens=pt,
+                    completion_tokens=ct,
+                    reasoning_tokens=rt,
+                    cost_usd=cost_val,
+                )
+            )
+            continue
         role_val = record.get("role")
         if rtype in ("thinking", "thought", "reasoning", "reasoning_content", "think") or role_val in ("thinking", "thought", "reasoning", "reasoning_content", "think"):
             content = record.get("content") or record.get("text") or record.get("thinking") or record.get("reasoning") or record.get("reasoning_content")
+            tok = record.get("tokens") or record.get("reasoning_tokens")
+            tok_int = int(tok) if tok is not None else None
             if content:
                 str_content = content if isinstance(content, str) else json.dumps(content)
                 if entries and entries[-1].role == "thinking":
-                    entries[-1] = TraceEntry("thinking", entries[-1].text + str_content)
+                    prev = entries[-1]
+                    prev_tok = prev.tokens or 0
+                    comb_tok = (prev_tok + (tok_int or 0)) if (prev.tokens is not None or tok_int is not None) else None
+                    entries[-1] = TraceEntry(
+                        role="thinking",
+                        text=prev.text + str_content,
+                        tokens=comb_tok,
+                        reasoning_tokens=comb_tok,
+                    )
                 else:
-                    entries.append(TraceEntry("thinking", str_content))
+                    entries.append(
+                        TraceEntry(
+                            role="thinking",
+                            text=str_content,
+                            tokens=tok_int,
+                            reasoning_tokens=tok_int,
+                        )
+                    )
             continue
         if rtype == "message":
             role = str(record.get("role") or "raw")
             thinking = record.get("thinking") or record.get("reasoning") or record.get("reasoning_content") or record.get("thought")
             if thinking:
-                entries.append(TraceEntry("thinking", thinking if isinstance(thinking, str) else json.dumps(thinking)))
+                th_str = thinking if isinstance(thinking, str) else json.dumps(thinking)
+                th_tok = record.get("reasoning_tokens")
+                entries.append(
+                    TraceEntry(
+                        "thinking",
+                        th_str,
+                        tokens=int(th_tok) if th_tok is not None else None,
+                        reasoning_tokens=int(th_tok) if th_tok is not None else None,
+                    )
+                )
             content = record.get("content")
             text = content if isinstance(content, str) else (json.dumps(content) if content is not None else "")
+
+            tool_name = record.get("tool_name")
+            tool_input = record.get("tool_input")
+            tool_output = record.get("tool_output")
+            tool_id = record.get("tool_id")
+            exit_code = record.get("exit_code")
+            logs = record.get("logs")
+            tokens = record.get("tokens")
+            prompt_tokens = record.get("prompt_tokens")
+            completion_tokens = record.get("completion_tokens")
+            reasoning_tokens = record.get("reasoning_tokens")
+            cost_usd = record.get("cost_usd")
+            duration_ms = record.get("duration_ms")
+
             if text and role == "assistant":
                 _emit_assistant_content(entries, text, file_state)
-            elif text:
+            elif text or tool_name or tool_output or tool_input is not None:
                 role_out = role if role in ROLE_STYLE else "raw"
-                if role == "system" and _looks_like_error(text):
+                if role in ("tool", "tool_call"):
+                    if text.startswith("tool_use "):
+                        role_out = "tool_call"
+                        if not tool_name:
+                            rest = text[9:].strip()
+                            if ":" in rest:
+                                p0, p1 = rest.split(":", 1)
+                                tool_name = p0.strip()
+                                if tool_input is None:
+                                    tool_input = p1.strip()
+                            else:
+                                tool_name = rest
+                    elif text.startswith("tool_result: "):
+                        role_out = "tool"
+                        if tool_output is None:
+                            tool_output = text[13:].strip()
+                        if logs is None:
+                            logs = tool_output
+                    elif role == "tool" and tool_output is None and text:
+                        tool_output = text
+                        if logs is None:
+                            logs = text
+                elif role == "system" and _looks_like_error(text):
                     role_out = "error"
-                entries.append(TraceEntry(role_out, text))
+
+                entries.append(
+                    TraceEntry(
+                        role=role_out,
+                        text=text,
+                        tool_name=tool_name,
+                        tool_input=tool_input,
+                        tool_output=tool_output,
+                        tool_id=tool_id,
+                        exit_code=exit_code,
+                        tokens=int(tokens) if tokens is not None else None,
+                        prompt_tokens=int(prompt_tokens) if prompt_tokens is not None else None,
+                        completion_tokens=int(completion_tokens) if completion_tokens is not None else None,
+                        reasoning_tokens=int(reasoning_tokens) if reasoning_tokens is not None else None,
+                        cost_usd=float(cost_usd) if cost_usd is not None else None,
+                        duration_ms=int(duration_ms) if duration_ms is not None else None,
+                        logs=logs,
+                    )
+                )
             continue
         entries.append(TraceEntry("raw", json.dumps(record)))
 

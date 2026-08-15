@@ -344,6 +344,17 @@ class RunState:
         cache_key = path.parent / f"{path.name}#models_by_backend"
         return self._cached_read(cache_key, _models_by_backend_and_defaults, stat_paths=(path,))
 
+    def _cached_cost_totals(self, run_dir: Path) -> dict[str, Any]:
+        from ..v0.cost import CostLedger
+        from ..v0.run_dir import cost_path
+
+        cp = cost_path(run_dir)
+        return self._cached_read(
+            run_dir / "cost.jsonl#totals",
+            lambda: CostLedger(cp).totals(),
+            stat_paths=(cp,),
+        )
+
     # ------------------------------------------------------------------
     # Run scanning / attachment (read-only browsing across runs_root)
     # ------------------------------------------------------------------
@@ -363,6 +374,7 @@ class RunState:
             # one at a glance from the rail's run chips — count pending
             # approvals per run (cached like every other per-snapshot read).
             approvals = self._cached_approvals(entry)
+            cost_totals = self._cached_cost_totals(entry)
             runs.append(
                 {
                     "id": entry.name,
@@ -374,6 +386,11 @@ class RunState:
                     "attached": entry.name == self._attached,
                     "hosted": self.is_hosted(entry.name),
                     "pending_approvals": sum(1 for item in approvals if item.status == "pending"),
+                    "total_tokens": cost_totals.get("total_tokens", 0),
+                    "cost_usd": cost_totals.get("cost_usd", 0.0),
+                    "prompt_tokens": cost_totals.get("prompt_tokens", 0),
+                    "completion_tokens": cost_totals.get("completion_tokens", 0),
+                    "reasoning_tokens": cost_totals.get("reasoning_tokens", 0),
                 }
             )
         runs.sort(key=lambda item: item["mtime"], reverse=True)
@@ -563,10 +580,7 @@ class RunState:
         # ``{tier, measured_tier, override, ...}``; the escalation history
         # is derived from events.jsonl's ``run_tier_escalated`` rows.
         tier_record, escalation_history = self._tier_and_escalation(run_dir, events)
-        from ..v0.cost import CostLedger
-        from ..v0.run_dir import cost_path
-        cost_ledger = CostLedger(cost_path(run_dir))
-        cost_totals = cost_ledger.totals()
+        cost_totals = self._cached_cost_totals(run_dir)
         return {
             "attached": True,
             "run_id": self.attached_run_id,

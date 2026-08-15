@@ -234,6 +234,7 @@ class ResolveTest(_EnvIsolatedTest):
         self.assertEqual(data["claude"], {})
         self.assertEqual(data["codex"], {})
         self.assertEqual(data["opencode"], {})
+        self.assertEqual(data["antigravity"], {})
 
     def test_malformed_config_json_raises(self) -> None:
         Path(self._tmp.name, "provider.json").write_text("{not json", encoding="utf-8")
@@ -274,6 +275,13 @@ class ResolveTest(_EnvIsolatedTest):
         with self.assertRaises(ProviderConfigError):
             read_config_file()
 
+    def test_antigravity_with_providers_key_raises(self) -> None:
+        self._write_config(
+            {"antigravity": {"provider": "google", "providers": {"google": {"model": "m"}}}}
+        )
+        with self.assertRaises(ProviderConfigError):
+            read_config_file()
+
     def test_unknown_top_level_key_raises(self) -> None:
         self._write_config({"bogus_backend": {"model": "m"}})
         with self.assertRaises(ProviderConfigError) as ctx:
@@ -286,6 +294,7 @@ class ResolveTest(_EnvIsolatedTest):
         self.assertEqual(data["claude"], {})
         self.assertEqual(data["codex"], {})
         self.assertEqual(data["opencode"], {})
+        self.assertEqual(data["antigravity"], {})
 
     def test_stale_gptme_default_falls_back_to_first_provider(self) -> None:
         config = self._multi_provider_config()
@@ -313,6 +322,7 @@ class EnsureUserConfigTest(_EnvIsolatedTest):
         self.assertIsNone(data["claude"]["model"])
         self.assertIsNone(data["codex"]["model"])
         self.assertEqual(data["opencode"]["model"], DEFAULT_MODEL)
+        self.assertEqual(data["antigravity"]["model"], "gemini-3.7-flash")
         # The sample itself must satisfy the same validation rules a real
         # user file does (round-trips through read_config_file cleanly).
         path.write_text(json.dumps(data), encoding="utf-8")
@@ -726,7 +736,7 @@ class ConfigFilePathTest(_EnvIsolatedTest):
         by_backend = list_models_by_backend(
             config_path=Path(self._tmp.name) / "no-such-config.json"
         )
-        self.assertEqual(by_backend, {"gptme": [], "claude": [], "codex": [], "opencode": []})
+        self.assertEqual(by_backend, {"gptme": [], "claude": [], "codex": [], "opencode": [], "antigravity": []})
 
     def test_provider_for_model_finds_owning_provider(self) -> None:
         from kusudaemon.provider_config import provider_for_model

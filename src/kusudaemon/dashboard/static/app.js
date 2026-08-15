@@ -276,12 +276,13 @@ function snapshotFingerprint(snap) {
   const pend = p(snap.pending_approvals).map((a) => `${a.approval_id}|${a.updated_at || a.created_at || 0}|${a.status}`).join(";");
   const apps = p(snap.approvals).map((a) => `${a.approval_id}|${a.updated_at || a.created_at || 0}|${a.status}`).join(";");
   const jobs = p(snap.jobs).map((j) => `${j.job_id || ""}|${j.status || ""}`).join(";");
-  const runs = p(snap.runs).map((r) => `${r.id}|${r.mtime}|${r.phase}|${r.status}|${r.attached ? "A" : ""}|${r.hosted ? "H" : ""}|${r.pending_approvals || 0}`).join(";");
+  const runs = p(snap.runs).map((r) => `${r.id}|${r.mtime}|${r.phase}|${r.status}|${r.attached ? "A" : ""}|${r.hosted ? "H" : ""}|${r.pending_approvals || 0}|${r.total_tokens || 0}`).join(";");
   return [
     snap.attached, snap.run_id, snap.goal,
     snap.phase, snap.phase_status, snap.phase_detail,
     snap.stalled ? "S" : "", snap.stalled_reason,
     snap.tier, snap.measured_tier, snap.tier_override,
+    snap.total_tokens || 0,
     (snap.escalation_history || []).length,
     sig(snap.tree_counts, ["passed", "failed", "blocked", "pending", "ready", "dispatched", "awaiting_review", "stale", "split"]),
     (snap.tree || []).filter((n) => n.status === "blocked").map((n) => n.id).join(","),
@@ -639,18 +640,119 @@ function diffLineKind(line) {
   return "context";
 }
 
-const _CHAT_ROLE_LABEL = {
-  assistant: "🤖 Agent",
-  thinking: "💭 Thinking",
-  tool_call: "🔧 Tool call",
-  tool: "🔧 Tool result",
-  system: "⚙️ System",
-  error: "❌ Error",
-  user: "Prompt",
-  diff: "📝 File change",
-  logdir: "Session",
-  raw: "",
-};
+function fmtTokens(n) {
+  if (n === null || n === undefined) return "0t";
+  const num = Number(n);
+  if (isNaN(num) || num === 0) return "0t";
+  if (num >= 1000000) return (num / 1000000).toFixed(2) + "M tok";
+  if (num >= 1000) return (num / 1000).toFixed(1) + "k tok";
+  return num + " tok";
+}
+
+function renderToolChatEntry(e) {
+  const isCall = e.role === "tool_call";
+  const toolName = e.tool_name || (isCall ? "Tool call" : "Tool result");
+  const toolId = e.tool_id ? ` · ${e.tool_id}` : "";
+  const exitBadge = e.exit_code !== undefined && e.exit_code !== null
+    ? el("span", { class: "tool-status-pill " + (e.exit_code === 0 ? "success" : "error") }, e.exit_code === 0 ? "✓ exit 0" : `✕ exit ${e.exit_code}`)
+    : null;
+  const tokenBadge = e.tokens
+    ? el("span", { class: "tool-token-pill", title: `Prompt: ${e.prompt_tokens || 0} · Output: ${e.completion_tokens || 0}` }, `🪙 ${fmtTokens(e.tokens)}`)
+    : null;
+  const durBadge = e.duration_ms
+    ? el("span", { class: "tool-dur-pill" }, `⏱ ${(e.duration_ms / 1000).toFixed(1)}s`)
+    : null;
+
+  let inputStr = "";
+  if (e.tool_input !== undefined && e.tool_input !== null) {
+    inputStr = typeof e.tool_input === "object" ? JSON.stringify(e.tool_input, null, 2) : String(e.tool_input);
+  }
+  const outputStr = e.tool_output || e.logs || (!isCall && e.text && !e.text.startsWith("tool_result: ") ? e.text : "");
+  const hasDetails = !!(inputStr || outputStr);
+  const summaryText = e.text || (isCall ? `call ${toolName}` : `result from ${toolName}`);
+
+  const copyBtn = (txt, label) => el("button", {
+    class: "btn-tiny tool-copy-btn",
+    onclick: (ev) => {
+      ev.stopPropagation();
+      navigator.clipboard.writeText(txt).then(() => showToast(`Copied ${label}`));
+    }
+  }, "📋 copy");
+
+  return el("div", { class: `stream-msg agent-chat-entry role-${e.role} tool-card` }, [
+    el("details", { class: "tool-details", open: null }, [
+      el("summary", { class: "tool-summary" }, [
+        el("div", { class: "tool-summary-hdr" }, [
+          el("span", { class: "tool-name" }, [isCall ? "🔧 " : "⚡ ", toolName, el("span", { class: "dim", style: "font-size:10px; font-weight:normal;" }, toolId)]),
+          exitBadge,
+          durBadge,
+          tokenBadge,
+          el("span", { class: "tool-toggle-cue" }, hasDetails ? "▸ details" : ""),
+        ]),
+        !hasDetails ? el("div", { class: "tool-inline-text" }, summaryText) : null,
+      ]),
+      hasDetails ? el("div", { class: "tool-body" }, [
+        inputStr ? el("div", { class: "tool-section" }, [
+          el("div", { class: "tool-section-hdr" }, [
+            el("span", { class: "tool-section-label" }, "PARAMETERS / INPUT"),
+            copyBtn(inputStr, "parameters"),
+          ]),
+          el("pre", { class: "tool-pre tool-input-pre" }, inputStr),
+        ]) : null,
+        outputStr ? el("div", { class: "tool-section" }, [
+          el("div", { class: "tool-section-hdr" }, [
+            el("span", { class: "tool-section-label" }, "OUTPUT & LOGS"),
+            copyBtn(outputStr, "logs"),
+          ]),
+          el("pre", { class: "tool-pre tool-output-pre" }, outputStr),
+        ]) : null,
+      ]) : null,
+    ]),
+  ]);
+}
+
+function renderThinkingChatEntry(e) {
+  const tokenBadge = (e.tokens || e.reasoning_tokens)
+    ? el("span", { class: "thinking-token-pill", title: "Reasoning tokens spent on this thought block" }, `🧠 ${fmtTokens(e.tokens || e.reasoning_tokens)}`)
+    : null;
+  const isLong = (e.text || "").length > 250;
+  return el("div", { class: "stream-msg agent-chat-entry role-thinking thinking-card" }, [
+    el("details", { class: "thinking-details", open: !isLong ? "" : null }, [
+      el("summary", { class: "thinking-summary" }, [
+        el("span", { class: "author" }, _CHAT_ROLE_LABEL.thinking),
+        tokenBadge,
+        el("span", { class: "thinking-toggle-cue" }, isLong ? "▸ toggle thought" : ""),
+      ]),
+      el("div", { class: "msg-body thinking-body" }, e.text),
+    ]),
+  ]);
+}
+
+function renderUsageChatEntry(e) {
+  return el("div", { class: "stream-msg agent-chat-entry role-usage usage-card" }, [
+    el("div", { class: "msg-hdr" }, [
+      el("span", { class: "author", style: "color:var(--accent-green);" }, "📊 Turn Token Usage"),
+      el("span", { class: "tool-token-pill" }, `🪙 ${fmtTokens(e.tokens)}`),
+      e.cost_usd ? el("span", { class: "dim", style: "font-size:11px;" }, `$${e.cost_usd.toFixed(4)}`) : null,
+    ]),
+    el("div", { class: "msg-body", style: "font-size:11px; font-family:var(--font-mono);" }, [
+      `Prompt: ${(e.prompt_tokens || 0).toLocaleString()} · Completion: ${(e.completion_tokens || 0).toLocaleString()} · Reasoning: ${(e.reasoning_tokens || 0).toLocaleString()}`,
+    ]),
+  ]);
+}
+
+function renderAssistantChatEntry(e) {
+  const tokenBadge = e.tokens
+    ? el("span", { class: "tool-token-pill", style: "margin-left:auto;", title: `Tokens: ${e.tokens} (Prompt: ${e.prompt_tokens || 0}, Completion: ${e.completion_tokens || 0})` }, `🪙 ${fmtTokens(e.tokens)}`)
+    : null;
+  return el("div", { class: "stream-msg agent-chat-entry role-assistant" }, [
+    el("div", { class: "msg-hdr" }, [
+      el("span", { class: "author" }, _CHAT_ROLE_LABEL.assistant),
+      tokenBadge,
+    ]),
+    el("div", { class: "msg-body" }, e.text),
+  ]);
+}
 
 function renderAgentChatEntry(e) {
   if (e.role === "diff") {
@@ -662,6 +764,18 @@ function renderAgentChatEntry(e) {
         (e.text || "").split("\n").map((line) => el("div", { class: `diff-line diff-${diffLineKind(line)}` }, line))
       ),
     ]);
+  }
+  if (e.role === "tool_call" || e.role === "tool") {
+    return renderToolChatEntry(e);
+  }
+  if (e.role === "thinking") {
+    return renderThinkingChatEntry(e);
+  }
+  if (e.role === "usage") {
+    return renderUsageChatEntry(e);
+  }
+  if (e.role === "assistant") {
+    return renderAssistantChatEntry(e);
   }
   const label = _CHAT_ROLE_LABEL[e.role] || e.role;
   return el("div", { class: `stream-msg agent-chat-entry role-${e.role}` }, [
@@ -1091,6 +1205,7 @@ function renderRail() {
   return el("div", { class: "rail" + (stalled ? " stalled" : "") + (snap.halted ? " halted" : "") }, [
     el("div", { class: "rail-left" }, segs.length ? segs : [el("span", { class: "rail-no-phase" }, "—")]),
     el("div", { class: "rail-right" }, [
+      snap.total_tokens !== undefined && snap.total_tokens !== null ? el("span", { class: "rail-tokens", title: `Total Tokens: ${(snap.total_tokens || 0).toLocaleString()} · Est. Cost: $${(snap.cost_usd || 0).toFixed(4)}` }, `🪙 ${fmtTokens(snap.total_tokens)}`) : null,
       el("span", { class: "rail-hosted", title: `${snap.hosted_count || 0} runs hosted · cap ${snap.max_concurrent_runs}` }, `${snap.hosted_count || 0}/${snap.max_concurrent_runs}`),
       // B1-4: reconnect affordance — the badge re-establishes the SSE stream
       // when it has fallen back to polling.
@@ -1112,6 +1227,10 @@ function renderHeaderRow() {
     title: esc.map((e) => `${e.from} → ${e.to} · ${e.trigger}${e.node_id ? " · " + e.node_id : ""}`).join("\n"),
   }, `⇡${esc.length}`) : null;
   const tierChip = tier ? el("span", { class: "hdr-tier-badge", title: `measured ${snap.measured_tier}${snap.tier_override ? ` · --tier ${snap.tier_override}` : ""}` }, tier) : null;
+  const tokensChip = (snap.total_tokens !== undefined && snap.total_tokens !== null) ? el("span", {
+    class: "hdr-tier-badge hdr-tokens-badge",
+    title: `Running Token Count: ${(snap.total_tokens || 0).toLocaleString()} tokens\nPrompt: ${(snap.cost_totals?.prompt_tokens || snap.prompt_tokens || 0).toLocaleString()}\nCompletion: ${(snap.cost_totals?.completion_tokens || snap.completion_tokens || 0).toLocaleString()}\nReasoning: ${(snap.cost_totals?.reasoning_tokens || snap.reasoning_tokens || 0).toLocaleString()}\nEst. Cost: $${(snap.cost_usd || 0).toFixed(4)}`,
+  }, `🪙 ${fmtTokens(snap.total_tokens)}`) : null;
   const liveSub = (snap.subagents || []).find((s) => s.live);
   const liveSubBadge = liveSub ? el("span", {
     class: "hdr-live-agent-badge",
@@ -1158,7 +1277,7 @@ function renderHeaderRow() {
   return el("div", { class: "hdr-run" }, [
     el("div", { class: "hdr-run-id" }, [
       el("span", { class: "runId", style: "cursor:pointer;", title: "switch run", onclick: () => { state.runSwitcherOpen = true; render(); } }, snap.run_id),
-      tierChip, escChip, liveSubBadge, noDriverBadge, backendSel,
+      tokensChip, tierChip, escChip, liveSubBadge, noDriverBadge, backendSel,
       snap.halted ? el("span", { class: "hdr-tier-badge hdr-halt-badge" }, "⏸ halted") : null,
     ]),
     el("div", { class: "hdr-goal", title: snap.goal }, snap.goal || "—"),
@@ -1198,6 +1317,7 @@ function renderRunSwitcher() {
     el("div", { class: "runrow" + (r.attached ? " active" : ""), onclick: () => { attachRun(r.id); state.runSwitcherOpen = false; } }, [
       el("span", { class: "rr-glyph" }, r.attached ? "✅" : r.hosted ? "●" : "·"),
       el("span", { class: "rr-id" }, r.id),
+      r.total_tokens !== undefined ? el("span", { class: "rr-tokens", title: `${(r.total_tokens || 0).toLocaleString()} tokens · $${(r.cost_usd || 0).toFixed(4)}` }, fmtTokens(r.total_tokens)) : null,
       el("span", { class: "rr-pip" }, r.pending_approvals ? `⏸ ${r.pending_approvals}` : ""),
       el("span", { class: "rr-phase" }, PHASE_GLYPH[r.status] || "·"),
       el("span", { class: "rr-goal" }, r.goal || ""),
@@ -1259,7 +1379,8 @@ function renderNav() {
     oncontextmenu: (e) => { e.preventDefault(); openRunMenu(e, r.id); },
   }, [
     el("span", { class: "row-glyph" }, r.attached ? "✅" : "·"),
-    el("span", { class: "row-id", title: r.id }, ltrunc(r.id, 18)),
+    el("span", { class: "row-id", title: r.id }, ltrunc(r.id, 14)),
+    r.total_tokens !== undefined ? el("span", { class: "row-tokens", title: `${(r.total_tokens || 0).toLocaleString()} tokens · $${(r.cost_usd || 0).toFixed(4)}` }, fmtTokens(r.total_tokens)) : null,
     el("span", { class: "row-pip" }, r.pending_approvals ? `⏸${r.pending_approvals}` : (r.hosted ? "●" : "")),
     el("span", { class: "row-status" }, PHASE_GLYPH[r.status] || "·"),
     snap.control_enabled && (r.hosted || r.status === "in_progress") ? el("button", {
@@ -1348,6 +1469,7 @@ function renderCenterStream() {
     snap.has_spec ? el("span", { class: "hdr-pill" }, "spec ✓") : null,
     snap.has_assembly ? el("span", { class: "hdr-pill" }, "assembly ✓") : null,
     snap.phase_status === "in_progress" && mainAgentId() ? el("span", { class: "hdr-pill", style: "color:var(--accent-purple);" }, `🤖 ${mainAgentId()}…`) : null,
+    snap.total_tokens ? el("span", { class: "hdr-pill", style: "color:var(--accent-amber);", title: `Running token count: ${(snap.total_tokens || 0).toLocaleString()} tokens` }, `🪙 ${fmtTokens(snap.total_tokens)}`) : null,
     el("span", { class: "hdr-pill dim" }, `${snap.events_count || 0} events`),
   ]);
 

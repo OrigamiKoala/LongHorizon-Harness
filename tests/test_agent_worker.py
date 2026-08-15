@@ -19,9 +19,11 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO_ROOT / "src"))
 
 from kusudaemon.adapters._agent_worker import (  # noqa: E402
+    translate_antigravity,
     translate_claude,
     translate_codex,
     translate_line,
+    translate_opencode,
 )
 
 _WORKER = _REPO_ROOT / "src" / "kusudaemon" / "adapters" / "_agent_worker.py"
@@ -57,7 +59,11 @@ class ClaudeTranslationTest(unittest.TestCase):
                     {"type": "thinking", "thinking": "hmm"},
                     {"type": "text", "text": "hello world"},
                     {"type": "tool_use", "id": "t1", "name": "Edit", "input": {"file_path": "a.md"}},
-                ]
+                ],
+                "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 50,
+                },
             },
         }
         out = _lines(translate_claude(record, "/tmp/sd"))
@@ -67,7 +73,11 @@ class ClaudeTranslationTest(unittest.TestCase):
         self.assertEqual(out[0]["content"], "hmm")
         self.assertEqual(out[1]["role"], "assistant")
         self.assertEqual(out[1]["content"], "hello world")
+        self.assertEqual(out[1]["tokens"], 150)
         self.assertEqual(out[2]["role"], "tool")
+        self.assertEqual(out[2]["tool_name"], "Edit")
+        self.assertEqual(out[2]["tool_input"], {"file_path": "a.md"})
+        self.assertEqual(out[2]["tool_id"], "t1")
         self.assertTrue(out[2]["content"].startswith("tool_use Edit: "))
 
     def test_empty_assistant_record_returns_none(self) -> None:
@@ -79,13 +89,25 @@ class ClaudeTranslationTest(unittest.TestCase):
         out = _lines(translate_claude(record, "/tmp/sd"))
         self.assertEqual(len(out), 1)
         self.assertEqual(out[0]["role"], "tool")
+        self.assertEqual(out[0]["tool_id"], "t1")
+        self.assertEqual(out[0]["logs"], huge)
         self.assertTrue(out[0]["content"].startswith("tool_result: "))
         self.assertTrue(out[0]["content"].endswith("…"))
 
     def test_result_becomes_final_assistant_message(self) -> None:
-        out = _lines(translate_claude({"type": "result", "subtype": "success", "result": "done"}, "/tmp/sd"))
+        out = _lines(translate_claude({
+            "type": "result",
+            "subtype": "success",
+            "result": "done",
+            "usage": {
+                "input_tokens": 200,
+                "output_tokens": 80,
+            }
+        }, "/tmp/sd"))
         self.assertEqual(out[0]["role"], "assistant")
         self.assertEqual(out[0]["content"], "done")
+        self.assertEqual(out[1]["type"], "usage")
+        self.assertEqual(out[1]["total_tokens"], 280)
         self.assertIsNone(translate_claude({"type": "result", "result": ""}, "/tmp/sd"))
 
     def test_unknown_record_types_pass_through(self) -> None:
@@ -128,22 +150,43 @@ class CodexTranslationTest(unittest.TestCase):
 
     def test_command_execution_started_and_completed(self) -> None:
         started = _lines(
-            translate_codex({"type": "item.started", "item": {"id": "c1", "type": "command_execution"}}, "/tmp/sd")
+            translate_codex({"type": "item.started", "item": {"id": "c1", "type": "command_execution", "command": "pytest"}}, "/tmp/sd")
         )
         self.assertEqual(started[0]["role"], "tool")
+        self.assertEqual(started[0]["tool_name"], "command_execution")
+        self.assertEqual(started[0]["tool_input"], "pytest")
         self.assertTrue(started[0]["content"].startswith("tool_use "))
         completed = _lines(
             translate_codex(
                 {
                     "type": "item.completed",
-                    "item": {"id": "c1", "type": "command_execution", "aggregated_output": "ok", "exit_code": 0},
+                    "item": {"id": "c1", "type": "command_execution", "command": "pytest", "aggregated_output": "ok", "exit_code": 0},
                 },
                 "/tmp/sd",
             )
         )
         self.assertEqual(completed[0]["role"], "tool")
+        self.assertEqual(completed[0]["tool_output"], "ok")
+        self.assertEqual(completed[0]["logs"], "ok")
+        self.assertEqual(completed[0]["exit_code"], 0)
         self.assertEqual(completed[0]["content"], "tool_result: ok")
         self.assertEqual(completed[1]["content"], "[exit_code=0]")
+
+    def test_turn_completed_emits_usage(self) -> None:
+        out = _lines(translate_codex({
+            "type": "turn.completed",
+            "usage": {
+                "input_tokens": 500,
+                "output_tokens": 120,
+                "reasoning_tokens": 80,
+            }
+        }, "/tmp/sd"))
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["type"], "usage")
+        self.assertEqual(out[0]["total_tokens"], 700)
+        self.assertEqual(out[0]["prompt_tokens"], 500)
+        self.assertEqual(out[0]["completion_tokens"], 120)
+        self.assertEqual(out[0]["reasoning_tokens"], 80)
 
     def test_item_updated_is_dropped(self) -> None:
         self.assertIsNone(translate_codex({"type": "item.updated", "item": {"id": "i1"}}, "/tmp/sd"))
@@ -158,6 +201,57 @@ class CodexTranslationTest(unittest.TestCase):
 
     def test_non_tool_item_started_is_dropped(self) -> None:
         self.assertIsNone(translate_codex({"type": "item.started", "item": {"id": "i1", "type": "agent_message"}}, "/tmp/sd"))
+
+
+class OpenCodeAndAntigravityTranslationTest(unittest.TestCase):
+    def test_opencode_step_finish_usage(self) -> None:
+        out = _lines(translate_opencode({
+            "type": "step-finish",
+            "tokens": {
+                "input": 300,
+                "output": 150,
+                "reasoning": 50,
+            }
+        }, "/tmp/sd"))
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["type"], "usage")
+        self.assertEqual(out[0]["total_tokens"], 500)
+        self.assertEqual(out[0]["prompt_tokens"], 300)
+        self.assertEqual(out[0]["completion_tokens"], 150)
+        self.assertEqual(out[0]["reasoning_tokens"], 50)
+
+    def test_antigravity_step_update_and_tool(self) -> None:
+        out_usage = _lines(translate_antigravity({
+            "event": "step_update",
+            "step_update": {
+                "step_type": "agent_response",
+                "text": "Hello Antigravity",
+                "token_usage": {
+                    "prompt_tokens": 400,
+                    "completion_tokens": 100,
+                    "total_tokens": 500,
+                },
+            },
+        }, "/tmp/sd"))
+        self.assertEqual(len(out_usage), 1)
+        self.assertEqual(out_usage[0]["role"], "assistant")
+        self.assertEqual(out_usage[0]["tokens"], 500)
+
+        out_tool = _lines(translate_antigravity({
+            "event": "step_update",
+            "step_update": {
+                "step_type": "tool",
+                "state": "DONE",
+                "tool_name": "run_command",
+                "output": "123\n",
+                "logs": "123\n",
+            },
+        }, "/tmp/sd"))
+        self.assertEqual(len(out_tool), 1)
+        self.assertEqual(out_tool[0]["role"], "tool")
+        self.assertEqual(out_tool[0]["tool_name"], "run_command")
+        self.assertEqual(out_tool[0]["tool_output"], "123\n")
+        self.assertEqual(out_tool[0]["logs"], "123\n")
 
 
 class WorkerEndToEndTest(unittest.TestCase):

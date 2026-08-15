@@ -171,6 +171,15 @@ def translate_claude(record: dict[str, Any], session_dir: str) -> list[str] | No
         blocks = message.get("content") if isinstance(message, dict) else None
         if not isinstance(blocks, list):
             return None
+        u = message.get("usage") if isinstance(message, dict) else None
+        prompt_tokens = None
+        completion_tokens = None
+        total_tokens = None
+        if isinstance(u, dict):
+            prompt_tokens = (u.get("input_tokens", 0) or 0) + (u.get("cache_read_input_tokens", 0) or 0) + (u.get("cache_creation_input_tokens", 0) or 0)
+            completion_tokens = u.get("output_tokens", 0) or 0
+            total_tokens = prompt_tokens + completion_tokens
+
         out: list[str] = []
         for block in blocks:
             if not isinstance(block, dict):
@@ -179,16 +188,38 @@ def translate_claude(record: dict[str, Any], session_dir: str) -> list[str] | No
             if btype == "thinking":
                 text = str(block.get("thinking") or "").strip()
                 if text:
-                    out.append(json.dumps({"type": "thinking", "content": text}))
+                    think_payload: dict[str, Any] = {"type": "thinking", "content": text}
+                    if completion_tokens and len(blocks) == 1:
+                        think_payload["tokens"] = completion_tokens
+                        think_payload["reasoning_tokens"] = completion_tokens
+                    out.append(json.dumps(think_payload))
             elif btype == "text":
                 text = str(block.get("text") or "")
                 if text.strip():
-                    out.append(json.dumps({"type": "message", "role": "assistant", "content": text}))
+                    msg_payload: dict[str, Any] = {"type": "message", "role": "assistant", "content": text}
+                    if prompt_tokens is not None:
+                        msg_payload["prompt_tokens"] = prompt_tokens
+                        msg_payload["completion_tokens"] = completion_tokens
+                        msg_payload["tokens"] = total_tokens
+                    out.append(json.dumps(msg_payload))
             elif btype == "tool_use":
                 name = str(block.get("name") or "tool_use")
                 args = block.get("input")
+                tool_id = block.get("id")
                 content = f"tool_use {name}: {_cap(_compact(args))}"
-                out.append(json.dumps({"type": "message", "role": "tool", "content": content}))
+                tool_payload: dict[str, Any] = {
+                    "type": "message",
+                    "role": "tool",
+                    "tool_name": name,
+                    "tool_input": args,
+                    "tool_id": tool_id,
+                    "content": content,
+                }
+                if prompt_tokens is not None:
+                    tool_payload["prompt_tokens"] = prompt_tokens
+                    tool_payload["completion_tokens"] = completion_tokens
+                    tool_payload["tokens"] = total_tokens
+                out.append(json.dumps(tool_payload))
         return out or None
     if rtype == "user":
         message = record.get("message")
@@ -201,17 +232,50 @@ def translate_claude(record: dict[str, Any], session_dir: str) -> list[str] | No
                 continue
             content = block.get("content")
             text = content if isinstance(content, str) else _compact(content) if content else ""
+            tool_id = block.get("tool_use_id")
+            is_err = bool(block.get("is_error"))
             out.append(
                 json.dumps(
-                    {"type": "message", "role": "tool", "content": f"tool_result: {_cap(text)}"}
+                    {
+                        "type": "message",
+                        "role": "tool",
+                        "tool_id": tool_id,
+                        "tool_output": text,
+                        "logs": text,
+                        "exit_code": 1 if is_err else 0,
+                        "content": f"tool_result: {_cap(text)}",
+                    }
                 )
             )
         return out or None
     if rtype == "result":
         text = str(record.get("result") or "").strip()
-        if not text:
-            return None
-        return [json.dumps({"type": "message", "role": "assistant", "content": text})]
+        usage = record.get("usage") if isinstance(record.get("usage"), dict) else {}
+        out = []
+        if text:
+            msg = {"type": "message", "role": "assistant", "content": text}
+            if usage:
+                inp = usage.get("input_tokens", 0) or 0
+                outp = usage.get("output_tokens", 0) or 0
+                msg["prompt_tokens"] = inp
+                msg["completion_tokens"] = outp
+                msg["tokens"] = inp + outp
+            out.append(json.dumps(msg))
+        if usage:
+            inp = usage.get("input_tokens", 0) or 0
+            outp = usage.get("output_tokens", 0) or 0
+            out.append(
+                json.dumps(
+                    {
+                        "type": "usage",
+                        "prompt_tokens": inp,
+                        "completion_tokens": outp,
+                        "total_tokens": inp + outp,
+                        "cost_usd": record.get("total_cost_usd") or record.get("cost_usd"),
+                    }
+                )
+            )
+        return out or None
     return None
 
 
@@ -233,6 +297,24 @@ def translate_codex(record: dict[str, Any], session_dir: str) -> list[str] | Non
                 }
             )
         ]
+    if rtype == "turn.completed":
+        usage = record.get("usage")
+        if isinstance(usage, dict):
+            inp = usage.get("input_tokens", 0) or 0
+            outp = usage.get("output_tokens", 0) or 0
+            reas = usage.get("reasoning_tokens", 0) or 0
+            return [
+                json.dumps(
+                    {
+                        "type": "usage",
+                        "prompt_tokens": inp,
+                        "completion_tokens": outp,
+                        "reasoning_tokens": reas,
+                        "total_tokens": inp + outp + reas,
+                    }
+                )
+            ]
+        return None
     if rtype == "error":
         message = str(record.get("message") or "")
         if message:
@@ -259,7 +341,17 @@ def translate_codex(record: dict[str, Any], session_dir: str) -> list[str] | Non
     item_type = item.get("type")
     if rtype == "item.started":
         if item_type in _CODEX_TOOL_ITEMS:
-            return [json.dumps({"type": "message", "role": "tool", "content": f"tool_use {item_type}"})]
+            inp = item.get("command") or item.get("input") or item.get("parameters") or item.get("args")
+            tool_payload: dict[str, Any] = {
+                "type": "message",
+                "role": "tool",
+                "tool_name": item_type,
+                "tool_id": item.get("id"),
+                "content": f"tool_use {item_type}" if inp is None else f"tool_use {item_type}: {_cap(_compact(inp))}",
+            }
+            if inp is not None:
+                tool_payload["tool_input"] = inp
+            return [json.dumps(tool_payload)]
         return None
     if rtype != "item.completed":
         return None
@@ -275,7 +367,12 @@ def translate_codex(record: dict[str, Any], session_dir: str) -> list[str] | Non
                 part for part in (item.get("summary") or []) if isinstance(part, str)
             ).strip()
         if text:
-            return [json.dumps({"type": "thinking", "content": text})]
+            think_payload: dict[str, Any] = {"type": "thinking", "content": text}
+            tok = item.get("tokens") or item.get("reasoning_tokens")
+            if tok:
+                think_payload["tokens"] = tok
+                think_payload["reasoning_tokens"] = tok
+            return [json.dumps(think_payload)]
         return None
     if item_type == "error":
         return [
@@ -284,16 +381,31 @@ def translate_codex(record: dict[str, Any], session_dir: str) -> list[str] | Non
             )
         ]
     if item_type == "command_execution":
-        out = []
         output = str(item.get("aggregated_output") or "").strip()
+        exit_code = item.get("exit_code")
+        cmd = item.get("command")
+        out = []
         if output:
             out.append(f"tool_result: {_cap(output)}")
-        exit_code = item.get("exit_code")
         if exit_code is not None:
             out.append(f"[exit_code={exit_code}]")
         if not out:
             return None
-        return [json.dumps({"type": "message", "role": "tool", "content": line}) for line in out]
+        return [
+            json.dumps(
+                {
+                    "type": "message",
+                    "role": "tool",
+                    "tool_name": "command_execution",
+                    "tool_input": cmd,
+                    "tool_output": output,
+                    "logs": output,
+                    "exit_code": exit_code,
+                    "content": line,
+                }
+            )
+            for line in out
+        ]
     if item_type == "file_change":
         changes = item.get("changes") or []
         lines = [
@@ -303,20 +415,54 @@ def translate_codex(record: dict[str, Any], session_dir: str) -> list[str] | Non
         ]
         if not lines:
             return None
-        return [json.dumps({"type": "message", "role": "tool", "content": _cap(line)}) for line in lines]
+        return [
+            json.dumps(
+                {
+                    "type": "message",
+                    "role": "tool",
+                    "tool_name": "file_change",
+                    "tool_input": changes,
+                    "tool_output": "\n".join(lines),
+                    "logs": "\n".join(lines),
+                    "content": _cap(line),
+                }
+            )
+            for line in lines
+        ]
     if item_type in {"mcp_tool_call", "dynamic_tool_call", "collab_tool_call"}:
         error = item.get("error")
+        tool_name = item.get("name") or item_type
+        tool_input = item.get("arguments") or item.get("parameters") or item.get("input")
         if isinstance(error, dict) and error.get("message"):
             return [
                 json.dumps(
-                    {"type": "message", "role": "tool", "content": f"tool_result: {error['message']}"}
+                    {
+                        "type": "message",
+                        "role": "tool",
+                        "tool_name": tool_name,
+                        "tool_input": tool_input,
+                        "tool_output": error["message"],
+                        "logs": error["message"],
+                        "exit_code": 1,
+                        "content": f"tool_result: {error['message']}",
+                    }
                 )
             ]
         result = item.get("result")
         if result:
+            text_res = _compact(result)
             return [
                 json.dumps(
-                    {"type": "message", "role": "tool", "content": f"tool_result: {_cap(_compact(result))}"}
+                    {
+                        "type": "message",
+                        "role": "tool",
+                        "tool_name": tool_name,
+                        "tool_input": tool_input,
+                        "tool_output": text_res,
+                        "logs": text_res,
+                        "exit_code": 0,
+                        "content": f"tool_result: {_cap(text_res)}",
+                    }
                 )
             ]
         return None
@@ -353,6 +499,22 @@ def translate_opencode(record: dict[str, Any], session_dir: str) -> list[str] | 
             )
         ]
     if rtype in ("step-finish", "step_finish"):
+        tokens = record.get("tokens") or part.get("tokens") or record.get("usage") or part.get("usage")
+        if isinstance(tokens, dict):
+            inp = tokens.get("input", 0) or tokens.get("prompt_tokens", 0) or 0
+            outp = tokens.get("output", 0) or tokens.get("completion_tokens", 0) or 0
+            reas = tokens.get("reasoning", 0) or tokens.get("reasoning_tokens", 0) or 0
+            return [
+                json.dumps(
+                    {
+                        "type": "usage",
+                        "prompt_tokens": inp,
+                        "completion_tokens": outp,
+                        "reasoning_tokens": reas,
+                        "total_tokens": inp + outp + reas,
+                    }
+                )
+            ]
         return None
     if rtype == "text":
         text = str(record.get("text") or record.get("content") or part.get("text") or "").strip()
@@ -371,7 +533,12 @@ def translate_opencode(record: dict[str, Any], session_dir: str) -> list[str] | 
             or ""
         ).strip()
         if text:
-            return [json.dumps({"type": "thinking", "content": text})]
+            tok = record.get("tokens") or part.get("tokens")
+            think_payload: dict[str, Any] = {"type": "thinking", "content": text}
+            if tok and isinstance(tok, int):
+                think_payload["tokens"] = tok
+                think_payload["reasoning_tokens"] = tok
+            return [json.dumps(think_payload)]
         return None
     if rtype in ("tool", "tool_use"):
         tool_name = str(record.get("tool") or record.get("name") or part.get("tool") or part.get("name") or "tool")
@@ -384,27 +551,52 @@ def translate_opencode(record: dict[str, Any], session_dir: str) -> list[str] | 
                     {
                         "type": "message",
                         "role": "tool",
+                        "tool_name": tool_name,
+                        "tool_input": inp,
                         "content": f"tool_use {tool_name}: {_cap(_compact(inp))}",
                     }
                 )
             )
         else:
             out.append(
-                json.dumps({"type": "message", "role": "tool", "content": f"tool_use {tool_name}"})
+                json.dumps({
+                    "type": "message",
+                    "role": "tool",
+                    "tool_name": tool_name,
+                    "content": f"tool_use {tool_name}",
+                })
             )
         output = state.get("output") if "output" in state else (record.get("output") if "output" in record else part.get("output"))
         if output is not None:
             text_out = output if isinstance(output, str) else _compact(output)
             out.append(
                 json.dumps(
-                    {"type": "message", "role": "tool", "content": f"tool_result: {_cap(text_out)}"}
+                    {
+                        "type": "message",
+                        "role": "tool",
+                        "tool_name": tool_name,
+                        "tool_input": inp,
+                        "tool_output": text_out,
+                        "logs": text_out,
+                        "content": f"tool_result: {_cap(text_out)}",
+                    }
                 )
             )
         return out or None
     if rtype == "tool_result":
         output = record.get("output") or record.get("content") or record.get("result") or part.get("output") or part.get("result") or ""
         text = output if isinstance(output, str) else _compact(output)
-        return [json.dumps({"type": "message", "role": "tool", "content": f"tool_result: {_cap(text)}"})]
+        tool_name = record.get("tool") or record.get("name") or part.get("tool")
+        return [
+            json.dumps({
+                "type": "message",
+                "role": "tool",
+                "tool_name": tool_name,
+                "tool_output": text,
+                "logs": text,
+                "content": f"tool_result: {_cap(text)}",
+            })
+        ]
     if rtype == "message":
         role = str(record.get("role") or "assistant")
         content = record.get("content")
@@ -466,33 +658,67 @@ def translate_antigravity(record: dict[str, Any], session_dir: str) -> list[str]
         update = record.get("step_update") if isinstance(record.get("step_update"), dict) else {}
         stype = update.get("step_type")
         state = update.get("state")
+        tok_usage = update.get("token_usage") or update.get("usage") or {}
+        prompt_tok = tok_usage.get("prompt_tokens") or tok_usage.get("input_tokens")
+        comp_tok = tok_usage.get("completion_tokens") or tok_usage.get("output_tokens")
+        tot_tok = tok_usage.get("total_tokens") or ((prompt_tok or 0) + (comp_tok or 0) if prompt_tok or comp_tok else None)
 
         if stype == "tool":
             tool_name = str(update.get("tool_name") or (update.get("tool_info") or {}).get("name") or "tool")
             tool_info = update.get("tool_info") if isinstance(update.get("tool_info"), dict) else {}
+            tool_id = update.get("tool_id") or tool_info.get("id")
             if state == "ACTIVE":
                 params = tool_info.get("parameters")
                 if params is not None:
                     content = f"tool_use {tool_name}: {_cap(_compact(params))}"
                 else:
                     content = f"tool_use {tool_name}"
-                return [json.dumps({"type": "message", "role": "tool", "content": content})]
+                payload = {
+                    "type": "message",
+                    "role": "tool",
+                    "tool_name": tool_name,
+                    "tool_input": params,
+                    "tool_id": tool_id,
+                    "content": content,
+                }
+                if tot_tok:
+                    payload["tokens"] = tot_tok
+                    payload["prompt_tokens"] = prompt_tok
+                    payload["completion_tokens"] = comp_tok
+                return [json.dumps(payload)]
             elif state == "DONE":
                 out = tool_info.get("output") if "output" in tool_info else update.get("output")
+                logs = update.get("logs")
+                exit_code = update.get("exit_code")
                 if out is not None:
                     text_out = out if isinstance(out, str) else _compact(out)
-                    return [
-                        json.dumps(
-                            {"type": "message", "role": "tool", "content": f"tool_result: {_cap(text_out)}"}
-                        )
-                    ]
+                    payload = {
+                        "type": "message",
+                        "role": "tool",
+                        "tool_name": tool_name,
+                        "tool_output": text_out,
+                        "logs": logs if logs is not None else text_out,
+                        "tool_id": tool_id,
+                        "exit_code": exit_code if exit_code is not None else 0,
+                        "content": f"tool_result: {_cap(text_out)}",
+                    }
+                    if tot_tok:
+                        payload["tokens"] = tot_tok
+                        payload["prompt_tokens"] = prompt_tok
+                        payload["completion_tokens"] = comp_tok
+                    return [json.dumps(payload)]
                 return None
             return None
 
         if stype == "agent_response":
             text = str(update.get("text_delta") or update.get("text") or update.get("content") or "").strip()
             if text:
-                return [json.dumps({"type": "message", "role": "assistant", "content": text})]
+                payload = {"type": "message", "role": "assistant", "content": text}
+                if tot_tok:
+                    payload["tokens"] = tot_tok
+                    payload["prompt_tokens"] = prompt_tok
+                    payload["completion_tokens"] = comp_tok
+                return [json.dumps(payload)]
             return None
 
         if stype in ("thinking", "reasoning"):
@@ -505,7 +731,11 @@ def translate_antigravity(record: dict[str, Any], session_dir: str) -> list[str]
                 or ""
             ).strip()
             if thought:
-                return [json.dumps({"type": "thinking", "content": thought})]
+                payload = {"type": "thinking", "content": thought}
+                if tot_tok:
+                    payload["tokens"] = tot_tok
+                    payload["reasoning_tokens"] = tot_tok
+                return [json.dumps(payload)]
             return None
 
         if stype == "error":
@@ -519,10 +749,23 @@ def translate_antigravity(record: dict[str, Any], session_dir: str) -> list[str]
     if event == "result":
         res = record.get("result") if isinstance(record.get("result"), dict) else {}
         status = res.get("status")
+        out = []
         if status == "ERROR":
             err = res.get("error") or res.get("response") or "Antigravity execution failed"
-            return [json.dumps({"type": "message", "role": "system", "content": f"Error: {err}"})]
-        return None
+            out.append(json.dumps({"type": "message", "role": "system", "content": f"Error: {err}"}))
+        tok = res.get("usage") or res.get("token_usage") or record.get("usage") or record.get("token_usage")
+        if isinstance(tok, dict):
+            inp = tok.get("prompt_tokens") or tok.get("input_tokens") or 0
+            out_tok = tok.get("completion_tokens") or tok.get("output_tokens") or 0
+            tot = tok.get("total_tokens") or (inp + out_tok)
+            out.append(json.dumps({
+                "type": "usage",
+                "prompt_tokens": inp,
+                "completion_tokens": out_tok,
+                "total_tokens": tot,
+                "cost_usd": tok.get("cost_usd"),
+            }))
+        return out or None
 
     if event == "error":
         msg = str(record.get("error") or record.get("message") or "")

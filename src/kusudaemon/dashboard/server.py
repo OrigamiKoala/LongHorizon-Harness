@@ -371,7 +371,35 @@ def _get_node_thinking(handler: "DashboardRequestHandler", match: Any, body: dic
     # stamp entries with its own wall clock, so any clock skew or a slow tick
     # interleaved thinking into the feed at the wrong place relative to the
     # events' server timestamps.
-    serialized = [{"role": e.role, "text": e.text, "ts": i} for i, e in enumerate(entries)]
+    def _serialize_entry(i: int, e: Any) -> dict[str, Any]:
+        d: dict[str, Any] = {"role": e.role, "text": e.text, "ts": i}
+        if e.tool_name is not None:
+            d["tool_name"] = e.tool_name
+        if e.tool_input is not None:
+            d["tool_input"] = e.tool_input
+        if e.tool_output is not None:
+            d["tool_output"] = e.tool_output
+        if e.tool_id is not None:
+            d["tool_id"] = e.tool_id
+        if e.exit_code is not None:
+            d["exit_code"] = e.exit_code
+        if e.tokens is not None:
+            d["tokens"] = e.tokens
+        if e.prompt_tokens is not None:
+            d["prompt_tokens"] = e.prompt_tokens
+        if e.completion_tokens is not None:
+            d["completion_tokens"] = e.completion_tokens
+        if e.reasoning_tokens is not None:
+            d["reasoning_tokens"] = e.reasoning_tokens
+        if e.cost_usd is not None:
+            d["cost_usd"] = e.cost_usd
+        if e.duration_ms is not None:
+            d["duration_ms"] = e.duration_ms
+        if e.logs is not None:
+            d["logs"] = e.logs
+        return d
+
+    serialized = [_serialize_entry(i, e) for i, e in enumerate(entries)]
     total = len(serialized)
     truncated = total > MAX_THINKING_ENTRIES
     if since > total:

@@ -118,6 +118,15 @@ def _wrap_thinking_stream(orig_stream):
                     chunk = next(orig_gen)
                 except StopIteration as stop:
                     metadata = stop.value
+                    if metadata:
+                        usage = getattr(metadata, "usage", None) or (metadata if isinstance(metadata, dict) else None)
+                        if usage:
+                            pt = getattr(usage, "prompt_tokens", 0) or (usage.get("prompt_tokens", 0) if isinstance(usage, dict) else 0) or 0
+                            ct = getattr(usage, "completion_tokens", 0) or (usage.get("completion_tokens", 0) if isinstance(usage, dict) else 0) or 0
+                            rt = getattr(usage, "reasoning_tokens", 0) or (usage.get("reasoning_tokens", 0) if isinstance(usage, dict) else 0) or 0
+                            tt = getattr(usage, "total_tokens", 0) or (usage.get("total_tokens", 0) if isinstance(usage, dict) else 0) or (pt + ct + rt)
+                            if tt:
+                                print(json.dumps({"type": "usage", "prompt_tokens": pt, "completion_tokens": ct, "reasoning_tokens": rt, "total_tokens": tt}), flush=True)
                     break
                 if not chunk:
                     yield chunk

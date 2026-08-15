@@ -115,7 +115,11 @@ class ToolCallAndDiffExtractionTest(unittest.TestCase):
 
     def test_non_file_tool_call_has_no_diff(self) -> None:
         entries = rendering.parse_trace(_msg("assistant", "```shell\nls -la\n```"))
-        self.assertEqual(entries, [rendering.TraceEntry("tool_call", "shell")])
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].role, "tool_call")
+        self.assertEqual(entries[0].text, "shell")
+        self.assertEqual(entries[0].tool_name, "shell")
+        self.assertEqual(entries[0].tool_input, "ls -la")
 
     def test_unlabeled_code_fence_is_left_as_plain_narration(self) -> None:
         content = "here's an example:\n```\nx = 1\n```"
@@ -123,6 +127,64 @@ class ToolCallAndDiffExtractionTest(unittest.TestCase):
         self.assertTrue(all(e.role == "assistant" for e in entries))
         self.assertEqual(entries[0].text, "here's an example:")
         self.assertIn("x = 1", entries[-1].text)
+
+
+class StructuredToolAndTokenExtractionTest(unittest.TestCase):
+    def test_usage_record_parsed_into_usage_trace_entry(self) -> None:
+        raw = json.dumps({
+            "type": "usage",
+            "prompt_tokens": 120,
+            "completion_tokens": 45,
+            "reasoning_tokens": 30,
+            "total_tokens": 195,
+            "cost_usd": 0.0025,
+        })
+        entries = rendering.parse_trace(raw)
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].role, "usage")
+        self.assertEqual(entries[0].tokens, 195)
+        self.assertEqual(entries[0].prompt_tokens, 120)
+        self.assertEqual(entries[0].completion_tokens, 45)
+        self.assertEqual(entries[0].reasoning_tokens, 30)
+        self.assertEqual(entries[0].cost_usd, 0.0025)
+
+    def test_structured_tool_message_parsed_with_details_and_tokens(self) -> None:
+        raw = json.dumps({
+            "type": "message",
+            "role": "tool",
+            "text": "tool_result: success",
+            "tool_name": "bash",
+            "tool_input": {"command": "echo test"},
+            "tool_output": "test\n",
+            "exit_code": 0,
+            "logs": "test\n",
+            "tokens": 42,
+            "prompt_tokens": 30,
+            "completion_tokens": 12,
+        })
+        entries = rendering.parse_trace(raw)
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].role, "tool")
+        self.assertEqual(entries[0].tool_name, "bash")
+        self.assertEqual(entries[0].tool_input, {"command": "echo test"})
+        self.assertEqual(entries[0].tool_output, "test\n")
+        self.assertEqual(entries[0].exit_code, 0)
+        self.assertEqual(entries[0].logs, "test\n")
+        self.assertEqual(entries[0].tokens, 42)
+
+    def test_thinking_with_token_count_parsed(self) -> None:
+        raw = json.dumps({
+            "type": "thinking",
+            "content": "Deep thought",
+            "tokens": 85,
+            "reasoning_tokens": 85,
+        })
+        entries = rendering.parse_trace(raw)
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].role, "thinking")
+        self.assertEqual(entries[0].text, "Deep thought")
+        self.assertEqual(entries[0].tokens, 85)
+        self.assertEqual(entries[0].reasoning_tokens, 85)
 
 
 class HeartbeatAndDedupeRemovalTest(unittest.TestCase):
