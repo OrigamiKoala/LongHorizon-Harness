@@ -36,7 +36,7 @@ from .survey import SpineUnit
 DEFAULT_DEPTH_CAP = 4
 DEFAULT_NODE_CAP = 400
 DEFAULT_TOOL_CALL_CAP = 15  # §4.3 leaf gate: "estimated tool calls <= K (start K=15)"
-DEFAULT_TOKEN_BUDGET = 24_000  # matches v1's NodeBudget default
+DEFAULT_TOKEN_BUDGET = 50_000  # matches v1's NodeBudget default
 DEFAULT_TOP_LEVEL_MIN_CHILDREN = 8
 DEFAULT_TOP_LEVEL_MAX_CHILDREN = 12
 

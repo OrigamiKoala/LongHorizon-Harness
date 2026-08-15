@@ -71,7 +71,7 @@ def build_direct_node(
     goal: str,
     *,
     node_id: str = DIRECT_NODE_ID,
-    token_budget: int = 24_000,
+    token_budget: int = 50_000,
     tool_call_cap: int = 15,
     inputs: tuple[str, ...] = (),
 ) -> TaskNode:

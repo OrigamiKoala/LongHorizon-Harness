@@ -84,7 +84,7 @@ class TreeValidationError(ValueError):
 
 @dataclass
 class NodeBudget:
-    tokens: int = 24_000
+    tokens: int = 50_000
     calls: int = 15
 
 
@@ -141,7 +141,7 @@ class TaskNode:
             inputs=list(data.get("inputs") or []),
             tools=list(data.get("tools") or []),
             budget=NodeBudget(
-                tokens=int(budget_data.get("tokens", 24_000)),
+                tokens=int(budget_data.get("tokens", 50_000)),
                 calls=int(budget_data.get("calls", 15)),
             ),
             judgment=list(data.get("judgment") or []),

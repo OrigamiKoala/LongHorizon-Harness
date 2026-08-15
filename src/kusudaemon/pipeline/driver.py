@@ -143,13 +143,13 @@ _IN_PROGRESS = "in_progress"
 
 # PLAN-zeromem.md §5.2c': per-node episode durations scale with the node's
 # token budget instead of every node getting the same flat 30 minutes.
-# NodeBudget.tokens defaults to 24_000 and v2/planner.py sets it per leaf
-# (default via DEFAULT_TOKEN_BUDGET); those 24k tokens map to the harness's
+# NodeBudget.tokens defaults to 50_000 and v2/planner.py sets it per leaf
+# (default via DEFAULT_TOKEN_BUDGET); those 50k tokens map to the harness's
 # historical flat EpisodeBudget default of 1800s. Floors and ceilings keep
 # a 400-token stub from getting a 30-second box and a generous chapter from
 # an unbounded one — the point is bounding pathology, not tight packing
 # (v1/gates.py's estimate_tokens feeds it: words/0.75, no tokenizer).
-_REFERENCE_BUDGET_TOKENS = 24_000
+_REFERENCE_BUDGET_TOKENS = 50_000
 _REFERENCE_DURATION_SECONDS = 1_800
 _MIN_EPISODE_SECONDS = 300  # 5 minutes: a slow-but-correct node must not
 # be converted into a hard max_attempts burn by a too-tight cap.

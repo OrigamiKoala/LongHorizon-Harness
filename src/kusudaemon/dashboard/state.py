@@ -269,14 +269,17 @@ class RunState:
         value = loader()
         with self._cache_lock:
             current = self._file_cache.get(key)
-            if current is not None and current[0] != stamp:
-                # A concurrent writer landed a fresher entry while we were
-                # parsing — leave it; ours is already stale.
-                return value
+            if current is not None and cached is not None and current[0] != cached[0]:
+                # Another loader landed a fresher entry while we were parsing
+                return current[1] if current[0] == stamp else value
             if len(self._file_cache) >= _CACHE_MAX_ENTRIES:
                 del self._file_cache[next(iter(self._file_cache))]
             self._file_cache[key] = (stamp, value)
         return value
+
+    def _invalidate_file_cache(self, path: Path) -> None:
+        with self._cache_lock:
+            self._file_cache.pop(str(path), None)
 
     def _cached_events(self, run_dir: Path) -> list[dict[str, Any]]:
         path = events_path(run_dir)
@@ -1150,6 +1153,7 @@ class RunState:
         # exactly the way the CLI's approve path does.
         resolved = record.resolve(action=action, user_input=user_input, answers=answers)
         approval_store.append(run_dir, resolved)
+        self._invalidate_file_cache(approvals_path(run_dir))
         if action == "apply":
             self._dispatch_resolved_job(run_dir, resolved)
         return True
@@ -1287,6 +1291,7 @@ class RunState:
                 context={"node_id": node_id, "defect": defect},
             )
             approval_store.append(run_dir, approval)
+            self._invalidate_file_cache(approvals_path(run_dir))
             return approval.to_dict(), ""
         # blocked / failed / stale: the node never passed — reopen's in-place
         # repair cannot touch it. Route to redispatch (the working recovery).
@@ -1305,6 +1310,7 @@ class RunState:
             context={"node_id": node_id, "reason": defect},
         )
         approval_store.append(run_dir, approval)
+        self._invalidate_file_cache(approvals_path(run_dir))
         return approval.to_dict(), ""
 
     def escalate(self) -> dict[str, Any]:
