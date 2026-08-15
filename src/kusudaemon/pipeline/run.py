@@ -24,7 +24,7 @@ from ..v0.events import EventLog
 from ..v1.provider import OpenAICompatibleProvider, RATE_LIMIT_BACKOFFS
 from .backends import parse_research_plan
 from .driver import RunOptions, RecursiveDriver
-from .run_dir import resolve_runs_root, run_spec_path, events_path, halt_path
+from .run_dir import events_path, halt_path, read_source_file, resolve_runs_root, run_spec_path
 
 _RUNS_ROOT_DEFAULT = "~/.kusudaemon/runs"
 
@@ -135,18 +135,7 @@ def _read_text_arg(raw: str | None) -> str:
     if not raw:
         return ""
     if raw.startswith("@"):
-        path = Path(raw[1:])
-        if path.suffix.lower() == ".pdf":
-            try:
-                import pypdf
-                reader = pypdf.PdfReader(path)
-                return "\n".join(page.extract_text() or "" for page in reader.pages).strip()
-            except ImportError:
-                pass
-        try:
-            return path.read_text(encoding="utf-8").strip()
-        except UnicodeDecodeError:
-            return path.read_text(encoding="utf-8", errors="replace").strip()
+        return read_source_file(raw[1:])
     if raw == "-":
         return sys.stdin.read().strip()
     return raw

@@ -215,7 +215,7 @@ class RunOptions:
     # ⌈n_chunks/8⌉ calls and was the dominant cost on large corpora.
     # _phase_survey already logs `survey_fallback` and degrades to the model
     # path when the retrieval extra isn't installed.
-    survey_mode: str = "embedding"
+    survey_mode: str = "model"
     # A6-4 (IMPLEMENTATION-PLAN-COST-AND-LIVE.md): inline spans are on by
     # default — a writer episode that must *discover* its inputs with `read`
     # calls pays a full extra round trip per input with the whole
@@ -318,7 +318,7 @@ class RunOptions:
             dispatch_policy=str(data.get("dispatch_policy", "model")),
             max_parallel=int(data.get("max_parallel", 1)),
             document_review=bool(data.get("document_review", False)),
-            survey_mode=str(data.get("survey_mode", "embedding")),
+            survey_mode=str(data.get("survey_mode", "model")),
             inline_spans=bool(data.get("inline_spans", True)),
             tier_override=data.get("tier_override"),
             no_intake=bool(data.get("no_intake", False)),

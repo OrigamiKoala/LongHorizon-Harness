@@ -148,7 +148,8 @@ def _load_index(run_dir: Path) -> list[dict[str, Any]]:
     path = chunk_index_path(run_dir)
     if not path.exists():
         return []
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    with path.open(encoding="utf-8") as f:
+        return [json.loads(line) for line in f if line.strip()]
 
 
 # §11.10.10: dense retrieval must not re-load and de-vectorize the whole
@@ -233,17 +234,19 @@ def retrieve_spans(
     if not candidates:
         return []
 
+    from ..v1.gates import _count_words
+
     full_texts = [str(record.get("text") or "") for record in records]
     n_docs = len(full_texts)
     df: dict[str, int] = {}
     for text in full_texts:
         for term in set(_tokenize(text)):
             df[term] = df.get(term, 0) + 1
-    avgdl = sum(len(t.split()) for t in full_texts) / max(1, n_docs)
+    avgdl = sum(_count_words(t) for t in full_texts) / max(1, n_docs)
 
     query_terms = _tokenize(query)
     bm25_raw = [
-        _bm25_score(query_terms, str(record.get("text") or ""), len(text.split()), avgdl, df, n_docs)
+        _bm25_score(query_terms, str(record.get("text") or ""), _count_words(text), avgdl, df, n_docs)
         for record, text in zip(candidates, [str(c.get("text") or "") for c in candidates])
     ]
     bm25_norm = _min_max_normalize(bm25_raw)

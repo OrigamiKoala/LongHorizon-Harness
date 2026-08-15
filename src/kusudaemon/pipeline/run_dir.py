@@ -157,16 +157,17 @@ def read_source_file(path: str | Path) -> str:
                 "Install it with: pip install pypdf"
             ) from exc
         try:
-            reader = pypdf.PdfReader(str(p))
-            pages_text = []
-            for page in reader.pages:
-                extracted = page.extract_text()
-                if extracted:
-                    pages_text.append(extracted)
-            full_text = "\n\n".join(pages_text).strip()
-            if not full_text:
-                raise ValueError(f"PDF file '{p}' contains no extractable text.")
-            return full_text
+            with p.open("rb") as fh:
+                reader = pypdf.PdfReader(fh)
+                pages_text = []
+                for page in reader.pages:
+                    extracted = page.extract_text()
+                    if extracted:
+                        pages_text.append(extracted)
+                full_text = "\n\n".join(pages_text).strip()
+                if not full_text:
+                    raise ValueError(f"PDF file '{p}' contains no extractable text.")
+                return full_text
         except Exception as exc:
             if isinstance(exc, (RuntimeError, ValueError)):
                 raise

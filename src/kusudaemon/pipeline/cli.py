@@ -34,6 +34,7 @@ from .run_dir import (
     contract_path,
     events_path,
     phase_path,
+    read_source_file,
     resolve_runs_root,
     run_spec_path,
     source_path,
@@ -250,10 +251,7 @@ def _expand_source_arg(raw: str) -> str:
     run.py:_read_text_arg (mirrored here because --detach must resolve the
     corpus *before* spawning its own run.py subprocess)."""
     if raw.startswith("@"):
-        path = Path(raw[1:])
-        if not path.exists():
-            raise FileNotFoundError(f"source file not found: {path}")
-        return path.read_text(encoding="utf-8", errors="replace").strip()
+        return read_source_file(raw[1:])
     if raw == "-":
         return sys.stdin.read().strip()
     return raw
