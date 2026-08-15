@@ -625,6 +625,57 @@ class ProviderStructuredOutputTest(unittest.TestCase):
         self.assertEqual(message["reasoning_content"], "weighing go vs stop")
         self.assertEqual(captured, ["weighing", " go vs stop"])
 
+    def test_streaming_does_not_duplicate_reasoning_chunks(self) -> None:
+        # §D14: streaming=True must not emit reasoning chunks twice
+        def stream_transport(url, payload, headers, on_reasoning):
+            lines = [
+                'data: {"choices":[{"delta":{"reasoning_content":"think A "}}]}',
+                "",
+                'data: {"choices":[{"delta":{"reasoning_content":"think B "}}]}',
+                "",
+                'data: {"choices":[{"delta":{"content":"{\\"action\\": \\"go\\"}"}}]}',
+                "",
+                "data: [DONE]",
+                "",
+            ]
+            return _consume_sse_lines(lines, on_reasoning)
+
+        captured: list[str] = []
+        provider = OpenAICompatibleProvider(stream_transport=stream_transport, api_key="unused")
+        res = provider.complete_json(
+            [{"role": "user", "content": "hi"}],
+            self.SCHEMA,
+            on_reasoning=captured.append,
+            streaming=True,
+        )
+        self.assertEqual(res, {"action": "go"})
+        self.assertEqual(captured, ["think A ", "think B "])
+
+    def test_streaming_is_incremental(self) -> None:
+        # §D15: _consume_sse_lines processes generator without pre-materializing all lines
+        events_fired: list[str] = []
+
+        def line_gen():
+            events_fired.append("gen_line_1")
+            yield 'data: {"choices":[{"delta":{"reasoning_content":"chunk1"}}]}'
+            events_fired.append("gen_line_2")
+            yield ""
+            events_fired.append("gen_line_3")
+            yield 'data: {"choices":[{"delta":{"content":"{\\"action\\": \\"go\\"}"}}]}'
+            events_fired.append("gen_line_4")
+            yield ""
+            events_fired.append("gen_line_5")
+            yield "data: [DONE]"
+
+        def callback(chunk: str):
+            events_fired.append(f"cb_{chunk}")
+
+        _consume_sse_lines(line_gen(), callback)
+        self.assertIn("cb_chunk1", events_fired)
+        idx_cb = events_fired.index("cb_chunk1")
+        idx_last = events_fired.index("gen_line_5")
+        self.assertLess(idx_cb, idx_last)
+
     def test_sse_parser_falls_back_to_a_plain_json_body(self) -> None:
         # An endpoint that ignores `stream: true` returns a normal JSON
         # body with no `data:` lines — parse it whole instead of failing
@@ -988,6 +1039,107 @@ class ReviewerInputCapTest(unittest.TestCase):
         self.assertNotIn("x x x x x x x x", capped)
         self.assertEqual(cap_artifact_text("short", ceiling_tokens=10), "short")
         self.assertEqual(cap_artifact_text("anything", ceiling_tokens=0), "")
+
+
+class TypeHintsIntegrityTest(unittest.TestCase):
+    def test_get_type_hints_across_all_kusudaemon_modules(self) -> None:
+        # §D16: ensure no unimported types (like Callable) raise NameError
+        import importlib
+        import inspect
+        import pkgutil
+        import typing
+        import kusudaemon
+
+        for module_info in pkgutil.walk_packages(kusudaemon.__path__, kusudaemon.__name__ + "."):
+            # skip modules that require heavy environment or specific cli runners if any
+            try:
+                mod = importlib.import_module(module_info.name)
+            except Exception:
+                continue
+            for name, obj in inspect.getmembers(mod):
+                if inspect.isfunction(obj) and getattr(obj, "__module__", None) == module_info.name:
+                    try:
+                        typing.get_type_hints(obj)
+                    except NameError as exc:
+                        self.fail(f"Module {module_info.name} function {name} has unresolvable type annotation: {exc}")
+
+
+class CyclicFallbackModelTest(unittest.TestCase):
+    SCHEMA = {"type": "object", "properties": {"action": {"type": "string"}}}
+
+    def test_cyclic_fallback_terminates_and_raises(self) -> None:
+        # §D20: cyclic fallback A -> B and B -> A terminates after bounded attempts
+        from kusudaemon import provider_config as pc
+
+        fallback_map = {"model-a": "model-b", "model-b": "model-a"}
+        old_get_fallback = pc.get_fallback_model
+        old_resolve = pc.resolve
+        try:
+            pc.get_fallback_model = lambda m: fallback_map.get(m)
+            pc.resolve = lambda model=None, **kw: pc.ProviderResolution(
+                base_url="http://fake", api_key="fake", model=model or "model-a"
+            )
+
+            sleeps: list[float] = []
+
+            def transport(url, payload, headers):
+                raise ProviderHTTPError(429, "Too Many Requests")
+
+            provider = OpenAICompatibleProvider(
+                model="model-a",
+                transport=transport,
+                api_key="unused",
+                sleep=sleeps.append,
+            )
+
+            with self.assertRaises(ProviderHTTPError):
+                provider.complete_json([{"role": "user", "content": "hi"}], self.SCHEMA)
+
+            # Assert number of sleeps is bounded (did not hang in infinite loop)
+            self.assertLessEqual(len(sleeps), len(RATE_LIMIT_BACKOFFS) + 5)
+        finally:
+            pc.get_fallback_model = old_get_fallback
+            pc.resolve = old_resolve
+
+
+class EventLogReadTailTest(unittest.TestCase):
+    def test_read_tail_returns_last_n_events(self) -> None:
+        # §D22: EventLog.read_tail(n) returns last n events without parsing everything
+        from kusudaemon.v0.events import EventLog
+        with tempfile.TemporaryDirectory() as root_str:
+            log_path = Path(root_str) / "events.jsonl"
+            log = EventLog(log_path)
+            for i in range(10):
+                log.append({"type": "test_event", "index": i})
+            tail = log.read_tail(3)
+            self.assertEqual(len(tail), 3)
+            self.assertEqual([e["index"] for e in tail], [7, 8, 9])
+
+
+class InputsExceedBudgetSpineTest(unittest.TestCase):
+    def test_inputs_exceed_budget_uses_spine_json_without_reading_files(self) -> None:
+        # §L11: _inputs_exceed_budget reads spine.json token counts
+        import json
+        from kusudaemon.v1.writer import _inputs_exceed_budget
+        from kusudaemon.v1.tree import TaskNode, NodeBudget
+        with tempfile.TemporaryDirectory() as root_str:
+            run_dir = Path(root_str)
+            spine_path = run_dir / "spine.json"
+            spine_path.write_text(
+                json.dumps([
+                    {"id": "unit-01", "tokens": 50000},
+                ]),
+                encoding="utf-8",
+            )
+            node = TaskNode(
+                id="n1",
+                brief="write",
+                artifact="out/n1.md",
+                gates=["nonempty"],
+                inputs=["unit-01"],
+                budget=NodeBudget(tokens=24000, calls=10),
+            )
+            self.assertTrue(_inputs_exceed_budget(run_dir, node))
 
 
 if __name__ == "__main__":

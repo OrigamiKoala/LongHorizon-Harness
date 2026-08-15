@@ -97,9 +97,34 @@ def writer_prompt(
 def _inputs_exceed_budget(run_dir: Path, node: TaskNode) -> bool:
     """Same measurement as ``v7/split.py:evaluate_split``'s precondition 1
     (module docstring) — joined resolved input text, one ``estimate_tokens``
-    call, compared against the node's own budget."""
+    call, compared against the node's own budget. PLAN-EFFICIENCY-AND-HORIZON.md §L11:
+    reads token counts from spine.json when every input resolves to a known unit."""
     if not node.inputs:
         return False
+    spine_file = run_dir / "spine.json"
+    if spine_file.exists():
+        try:
+            spine_data = json.loads(spine_file.read_text(encoding="utf-8"))
+            if isinstance(spine_data, list):
+                unit_tokens = {}
+                for u in spine_data:
+                    uid = u.get("id")
+                    tokens = int(u.get("tokens", 0))
+                    if uid:
+                        unit_tokens[uid] = tokens
+                        unit_tokens[f"spine/{uid}.md"] = tokens
+                if all(
+                    inp in unit_tokens or Path(inp).name in unit_tokens or Path(inp).stem in unit_tokens
+                    for inp in node.inputs
+                ):
+                    total_tokens = sum(
+                        unit_tokens.get(inp) or unit_tokens.get(Path(inp).name) or unit_tokens.get(Path(inp).stem, 0)
+                        for inp in node.inputs
+                    )
+                    return total_tokens > node.budget.tokens
+        except Exception:
+            pass
+
     joined = "\n".join(
         _read_resolved(run_dir, ref) for ref in node.inputs
     )

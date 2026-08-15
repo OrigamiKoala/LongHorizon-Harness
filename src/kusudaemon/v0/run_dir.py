@@ -70,6 +70,11 @@ def manifest_path(run_dir: str | Path) -> Path:
     return Path(run_dir) / "manifest.jsonl"
 
 
+def cost_path(run_dir: str | Path) -> Path:
+    """PLAN-EFFICIENCY-AND-HORIZON.md §M1: <run_dir>/cost.jsonl — append-only cost ledger."""
+    return Path(run_dir) / "cost.jsonl"
+
+
 def glossary_path(run_dir: str | Path) -> Path:
     """§C1: ``<run_dir>/glossary.json`` — the term → defining-location index
     the ``terms_defined`` warn-gate dereferences against (old PLAN §4.6's

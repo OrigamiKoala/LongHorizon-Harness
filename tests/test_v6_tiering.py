@@ -280,25 +280,27 @@ class ClassifyTest(unittest.TestCase):
         estimate = ScopeEstimate(files_touched="1", artifacts=1, answerable_without_exploration=True)
         self.assertEqual(classify(self._signals(breadth_markers=3), estimate), "T1")
 
-    def test_t2_by_artifact_count(self) -> None:
+    def test_t2_small_work_tokens_and_artifacts(self) -> None:
         estimate = ScopeEstimate(files_touched="many", artifacts=5)
-        self.assertEqual(classify(self._signals(work_tokens=500_000), estimate), "T2")
+        self.assertEqual(classify(self._signals(work_tokens=50_000), estimate), "T2")
 
-    def test_t2_by_small_work_tokens(self) -> None:
-        estimate = ScopeEstimate(files_touched="many", artifacts=20)
-        self.assertEqual(classify(self._signals(work_tokens=1_000), estimate), "T2")
+    def test_t2_requires_both_small_work_and_artifact_cap(self) -> None:
+        # §D18: T2 is conjunctive -- 4.4M tokens with artifacts=5 routes to T3
+        large_work = self._signals(work_tokens=4_400_000)
+        estimate_few_art = ScopeEstimate(files_touched="many", artifacts=5)
+        self.assertEqual(classify(large_work, estimate_few_art), "T3")
+
+        small_work = self._signals(work_tokens=50_000)
+        estimate_many_art = ScopeEstimate(files_touched="many", artifacts=20)
+        self.assertEqual(classify(small_work, estimate_many_art), "T3")
 
     def test_t0_and_t1_require_small_work_tokens(self) -> None:
-        # §E28: T0/T1 rows had no work_tokens guard -- a 4.4M-token corpus
-        # whose estimate said "1 artifact, few files" classified T1, and the
-        # single node ran blind (no spine, no inputs, see §E28's driver
-        # fix). A corpus that big must fall to T2 where survey builds a
-        # spine and the planner partitions it.
+        # §E28 / §D18: a 4.4M-token corpus falls past T0, T1, and T2 to T3
         big = self._signals(work_tokens=4_000_000)
         estimate = ScopeEstimate(files_touched="1", artifacts=1, answerable_without_exploration=True)
-        self.assertEqual(classify(big, estimate), "T2")
+        self.assertEqual(classify(big, estimate), "T3")
         estimate_few = ScopeEstimate(files_touched="few", artifacts=1)
-        self.assertEqual(classify(big, estimate_few), "T2")
+        self.assertEqual(classify(big, estimate_few), "T3")
 
     def test_t3_otherwise(self) -> None:
         estimate = ScopeEstimate(files_touched="many", artifacts=20)
@@ -591,7 +593,7 @@ class ClassifyNoIntakeSkipTest(unittest.TestCase):
             ),
         )
 
-    def test_no_intake_big_signals_skip_the_estimate_call_and_measure_t2(self) -> None:
+    def test_no_intake_big_signals_skip_the_estimate_call_and_measure_t3(self) -> None:
         import asyncio
 
         async def scenario() -> None:
@@ -603,10 +605,10 @@ class ClassifyNoIntakeSkipTest(unittest.TestCase):
                 await driver._phase_classify()
                 self.assertEqual(len(provider.calls), 0)
                 record = json.loads(tier_path(run_dir).read_text(encoding="utf-8"))
-                self.assertEqual(record["tier"], "T2")
-                self.assertEqual(record["measured_tier"], "T2")
+                self.assertEqual(record["tier"], "T3")
+                self.assertEqual(record["measured_tier"], "T3")
                 self.assertFalse(record["needs_intake"])
-                # T2 has an explore phase, so needs_explore stays honest.
+                # T3 has an explore phase, so needs_explore stays honest.
                 self.assertTrue(record["needs_explore"])
 
         asyncio.run(scenario())

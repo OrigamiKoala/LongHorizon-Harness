@@ -524,6 +524,101 @@ class BuildTreeTest(unittest.TestCase):
             self.assertEqual(set(reloaded.nodes), set(tree.nodes))
             self.assertEqual(len(reloaded.ready_nodes()), 3)
 
+    def test_depth_cap_one_forces_leaves_without_recursion(self) -> None:
+        # §D17: at depth_cap=1 (T2), child candidates that fail leaf_gate are forced as leaves at depth 1 with no recurse calls
+        units = _units(4, tokens=50_000)  # Each unit over budget
+        provider = FakeProvider(
+            [
+                {
+                    "children": [
+                        {
+                            "id": f"c{i}",
+                            "brief": f"write unit {i}",
+                            "unit_start": i,
+                            "unit_end": i,
+                            "estimated_calls": 3,
+                            "shape": "prose-dominant",
+                        }
+                        for i in range(4)
+                    ]
+                }
+            ]
+        )
+        tree = build_tree(units, provider, depth_cap=1)
+        self.assertEqual(len(provider.calls), 1)
+        self.assertEqual(len(tree.nodes), 4)
+        for node in tree.nodes.values():
+            self.assertNotIn(".", node.id)
+
+    def test_code_tile_planner_avoids_plan_level_when_units_exceed_budget(self) -> None:
+        # §L4: when code_tile_planner is True and all units >= budget, force leaves with 0 calls
+        units = _units(4, tokens=50_000)
+        provider = FakeProvider([])  # Zero calls
+        tree = build_tree(units, provider, token_budget=24_000, code_tile_planner=True)
+        self.assertEqual(len(provider.calls), 0)
+        self.assertEqual(len(tree.nodes), 4)
+
+    def test_leaf_gate_trust_estimated_calls_false_ignores_calls_cap(self) -> None:
+        # §D26: trust_estimated_calls=False lets estimated_calls > tool_call_cap pass leaf gate
+        candidate = Candidate(
+            id="a", brief="write a summary", shape="prose-dominant",
+            unit_start=0, unit_end=0, estimated_calls=99, tokens=1000,
+        )
+        is_leaf, reasons = leaf_gate(candidate, token_budget=24000, tool_call_cap=15, trust_estimated_calls=False)
+        self.assertTrue(is_leaf)
+        self.assertEqual(reasons, [])
+
+    def test_depends_on_populated_and_cycles_broken(self) -> None:
+        # §M2: depends_on populated from model, unknown deps and cycles dropped
+        import tempfile
+        from kusudaemon.v0.events import EventLog
+
+        units = _units(3, tokens=1000)
+        provider = FakeProvider([
+            {
+                "children": [
+                    {
+                        "id": "model_node",
+                        "brief": "Implement model",
+                        "unit_start": 0,
+                        "unit_end": 0,
+                        "estimated_calls": 2,
+                        "shape": "prose-dominant",
+                        "depends_on": [],
+                    },
+                    {
+                        "id": "endpoint_node",
+                        "brief": "Implement endpoint",
+                        "unit_start": 1,
+                        "unit_end": 1,
+                        "estimated_calls": 2,
+                        "shape": "prose-dominant",
+                        "depends_on": ["model_node", "nonexistent_dep"],
+                    },
+                    {
+                        "id": "test_node",
+                        "brief": "Implement test",
+                        "unit_start": 2,
+                        "unit_end": 2,
+                        "estimated_calls": 2,
+                        "shape": "prose-dominant",
+                        "depends_on": ["endpoint_node"],
+                    },
+                ]
+            }
+        ])
+        with tempfile.TemporaryDirectory() as root_str:
+            log = EventLog(root_str + "/events.jsonl")
+            tree = build_tree(units, provider, log=log)
+            self.assertEqual(tree.nodes["model_node"].depends_on, [])
+            self.assertEqual(tree.nodes["endpoint_node"].depends_on, ["model_node"])
+            self.assertEqual(tree.nodes["test_node"].depends_on, ["endpoint_node"])
+            # nonexistent_dep was dropped and logged
+            events = log.read_all()
+            dropped = [e for e in events if e.get("type") == "planner_dep_dropped"]
+            self.assertEqual(len(dropped), 1)
+            self.assertEqual(dropped[0]["dep"], "nonexistent_dep")
+
 
 if __name__ == "__main__":
     unittest.main()

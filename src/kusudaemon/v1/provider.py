@@ -29,8 +29,9 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
+from .gates import estimate_tokens
 from .json_schema import describe_schema, validate
 from ..provider_config import require, resolve
 
@@ -123,6 +124,11 @@ class OpenAICompatibleProvider(RoleProviderBase):
         on_backoff: Callable[[int, float], None] | None = None,
         should_abort: Callable[[], bool] | None = None,
         on_model_fallback: Callable[[str, str, str], None] | None = None,
+        cost_ledger: Any = None,
+        role: str = "unknown",
+        phase: str = "unknown",
+        node_id: str = "-",
+        on_usage: Callable[[int, int, int], None] | None = None,
     ) -> None:
         resolved = resolve(provider=provider or "", api_key=api_key or "", base_url=base_url or "", model=model or "")
         self.model = resolved.model
@@ -153,10 +159,14 @@ class OpenAICompatibleProvider(RoleProviderBase):
         self._on_backoff = on_backoff
         self._should_abort = should_abort
         self._on_model_fallback = on_model_fallback
-        # A4-1 (IMPLEMENTATION-PLAN-COST-AND-LIVE.md): the `response_format`
-        # fallback latch is per-provider, not per-call. `None` = unknown (try
-        # with the field); `False` = the endpoint 400'd it once, never send it
-        # again for the life of this provider — otherwise every structured
+        self.cost_ledger = cost_ledger
+        self.role = role
+        self.phase = phase
+        self.node_id = node_id
+        self.on_usage = on_usage
+        # §11.10.2 / A4-1: remember whether this endpoint supports
+        # `response_format: {type: json_schema, ...}` across calls on the
+        # same provider instance. Defaults to `None` (untested) — the first
         # call on an endpoint that rejects `response_format` burns a wasted
         # HTTP request first, a literal 2× on request count for the entire
         # Direct column.
@@ -172,6 +182,35 @@ class OpenAICompatibleProvider(RoleProviderBase):
         # one run can't starve the endpoint for the other.
         self._throttle = threading.Semaphore(max(1, concurrency))
 
+    def _record_usage(self, payload: dict[str, Any], raw: dict[str, Any], content: str) -> None:
+        usage = raw.get("usage") if isinstance(raw, dict) else None
+        if usage and isinstance(usage, dict):
+            prompt_tokens = int(usage.get("prompt_tokens", 0) or 0)
+            completion_tokens = int(usage.get("completion_tokens", 0) or 0)
+            reasoning_tokens = int(usage.get("completion_tokens_details", {}).get("reasoning_tokens", 0) or 0)
+        else:
+            prompt_tokens = estimate_tokens(str(payload.get("messages", "")))
+            prompt_tokens = max(1, prompt_tokens)
+            completion_tokens = max(1, estimate_tokens(content))
+            reasoning_tokens = 0
+        if self.cost_ledger is not None and hasattr(self.cost_ledger, "record"):
+            self.cost_ledger.record(
+                role=self.role,
+                phase=self.phase,
+                node=self.node_id,
+                model=self.model,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                reasoning_tokens=reasoning_tokens,
+            )
+        if self.on_usage is not None:
+            self.on_usage({
+                "model": self.model,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "reasoning_tokens": reasoning_tokens,
+            })
+
     def complete(
         self, messages: list[dict[str, str]], *, temperature: float = 0.0
     ) -> ProviderResponse:
@@ -183,8 +222,10 @@ class OpenAICompatibleProvider(RoleProviderBase):
         }
         raw = self._call(payload)
         message = _first_choice_message(raw)
+        content = message.get("content") or ""
+        self._record_usage(payload, raw, content)
         return ProviderResponse(
-            content=message.get("content") or "",
+            content=content,
             reasoning_content=message.get("reasoning_content") or "",
             raw=raw,
         )
@@ -229,6 +270,8 @@ class OpenAICompatibleProvider(RoleProviderBase):
                 "temperature": temperature,
                 "stream": streaming,
             }
+            if streaming:
+                payload["stream_options"] = {"include_usage": True}
             if with_format:
                 payload["response_format"] = {
                     "type": "json_schema",
@@ -244,9 +287,10 @@ class OpenAICompatibleProvider(RoleProviderBase):
         # re-learning the rejection on its first request.
         use_format = self._response_format_ok is not False
         for _attempt in range(retries + 1):
+            curr_payload = make_payload(with_format=use_format)
             try:
                 raw = self._call(
-                    make_payload(with_format=use_format),
+                    curr_payload,
                     stream=streaming,
                     on_reasoning=on_reasoning,
                 )
@@ -261,17 +305,19 @@ class OpenAICompatibleProvider(RoleProviderBase):
                     raise
                 self._response_format_ok = False
                 use_format = False
+                curr_payload = make_payload(with_format=False)
                 raw = self._call(
-                    make_payload(with_format=False),
+                    curr_payload,
                     stream=streaming,
                     on_reasoning=on_reasoning,
                 )
             message = _first_choice_message(raw)
-            if on_reasoning is not None:
+            if not streaming and on_reasoning is not None:
                 reasoning = message.get("reasoning_content")
                 if reasoning:
                     on_reasoning(reasoning)
             content = message.get("content") or ""
+            self._record_usage(curr_payload, raw, content)
             parsed, parse_error = _parse_json_object(content)
             if parsed is not None:
                 schema_errors = validate(parsed, schema)
@@ -314,6 +360,8 @@ class OpenAICompatibleProvider(RoleProviderBase):
         # below the operator-specified schedule), capped at the ladder's own
         # ceiling; on the 5xx branch it stays capped at 60s as before.
         attempt = 0
+        switches = 0
+        tried_models: set[str] = {self.model}
         while True:
             try:
                 with self._throttle:
@@ -327,11 +375,11 @@ class OpenAICompatibleProvider(RoleProviderBase):
                     raise
                 if exc.status == 429:
                     # §G4: on the second 429 rung (attempt == 1), try a model fallback if configured
-                    if attempt == 1:
+                    if attempt == 1 and switches < 4:
                         from ..provider_config import get_fallback_model, resolve as resolve_provider
 
                         fallback_model = get_fallback_model(self.model)
-                        if fallback_model and fallback_model != self.model:
+                        if fallback_model and fallback_model != self.model and fallback_model not in tried_models:
                             old_model = self.model
                             reason = f"429 rate limit on {old_model}"
                             try:
@@ -340,6 +388,8 @@ class OpenAICompatibleProvider(RoleProviderBase):
                                 self.base_url = res.base_url.rstrip("/")
                                 self.api_key = res.api_key
                                 payload["model"] = self.model
+                                tried_models.add(self.model)
+                                switches += 1
                                 if self._on_model_fallback is not None:
                                     self._on_model_fallback(old_model, self.model, reason)
                                 attempt = 0
@@ -420,7 +470,7 @@ class OpenAICompatibleProvider(RoleProviderBase):
         request = urllib.request.Request(url, data=body, headers=headers, method="POST")
         try:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
-                lines = [line.decode("utf-8", errors="replace").rstrip("\n") for line in response]
+                lines = (line.decode("utf-8", errors="replace").rstrip("\n") for line in response)
                 return _consume_sse_lines(lines, on_reasoning)
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
@@ -433,7 +483,7 @@ class OpenAICompatibleProvider(RoleProviderBase):
 
 
 def _consume_sse_lines(
-    lines: list[str], on_reasoning: Callable[[str], None] | None
+    lines: Iterable[str], on_reasoning: Callable[[str], None] | None
 ) -> dict[str, Any]:
     """B3-1: parse one SSE response body into the synthetic
     ``{choices: [{message: ...}]}`` shape ``_first_choice_message`` reads.
@@ -450,6 +500,7 @@ def _consume_sse_lines(
     reasoning_parts: list[str] = []
     event_lines: list[str] = []
     raw_parts: list[str] = []
+    usage_parts: dict[str, Any] = {}
     saw_sse = False
     for line in lines:
         raw_parts.append(line)
@@ -457,7 +508,7 @@ def _consume_sse_lines(
             if line == "" and event_lines:
                 saw_sse = True
                 _consume_sse_event(
-                    "\n".join(event_lines), content_parts, reasoning_parts, on_reasoning
+                    "\n".join(event_lines), content_parts, reasoning_parts, on_reasoning, usage_parts
                 )
                 event_lines = []
             continue
@@ -468,11 +519,11 @@ def _consume_sse_lines(
             break
         event_lines.append(data)
     if event_lines:
-        _consume_sse_event("\n".join(event_lines), content_parts, reasoning_parts, on_reasoning)
+        _consume_sse_event("\n".join(event_lines), content_parts, reasoning_parts, on_reasoning, usage_parts)
     if not content_parts and not reasoning_parts and not saw_sse:
         parsed = json.loads("\n".join(raw_parts))
         return parsed
-    return {
+    res: dict[str, Any] = {
         "choices": [
             {
                 "message": {
@@ -482,6 +533,9 @@ def _consume_sse_lines(
             }
         ]
     }
+    if usage_parts:
+        res["usage"] = usage_parts
+    return res
 
 
 def _consume_sse_event(
@@ -489,11 +543,14 @@ def _consume_sse_event(
     content_parts: list[str],
     reasoning_parts: list[str],
     on_reasoning: Callable[[str], None] | None,
+    usage_parts: dict[str, Any] | None = None,
 ) -> None:
     try:
         chunk = json.loads(data)
     except json.JSONDecodeError:
         return
+    if usage_parts is not None and isinstance(chunk, dict) and "usage" in chunk and isinstance(chunk["usage"], dict):
+        usage_parts.update(chunk["usage"])
     choice = (chunk.get("choices") or [{}])[0]
     delta = choice.get("delta") or choice.get("message") or {}
     content = delta.get("content")
@@ -508,8 +565,8 @@ def _consume_sse_event(
 
 def _parse_retry_after(value: str | None) -> float | None:
     """``Retry-After`` as HTTP-date or seconds; seconds only — a date is
-    ambiguous to parse without timezone tables, and §11.10.3 caps whatever
-    comes back at 60s anyway."""
+    ambiguous to parse without timezone tables. Caps at 60s on 5xx errors
+    and caps at ``RATE_LIMIT_BACKOFFS[-1]`` (5h) on 429 rate limits."""
     if not value:
         return None
     try:

@@ -365,6 +365,27 @@ class HiddenPathsNoticeTest(unittest.TestCase):
         )
         self.assertLess(labels.index("hidden_path_exceptions"), labels.index("artifact_instruction"))
 
+    def test_segments_returns_ordered_label_pairs(self) -> None:
+        # §L10: segments() returns list of (label, text)
+        from kusudaemon.pipeline.prompts import segments
+        with tempfile.TemporaryDirectory() as root_str:
+            run_dir = Path(root_str)
+            segs = segments(_node(), run_dir)
+            labels = [label for label, _ in segs]
+            self.assertIn("brief", labels)
+            self.assertIn("artifact_instruction", labels)
+
+    def test_promotions_cached_read(self) -> None:
+        # §D23: cached manifest read in _promotions_of
+        from kusudaemon.pipeline.prompts import _promotions_of
+        with tempfile.TemporaryDirectory() as root_str:
+            run_dir = Path(root_str)
+            manifest = run_dir / "manifest.jsonl"
+            manifest.write_text(json.dumps({"node": "dep1", "promotion": "handover note"}) + "\n", encoding="utf-8")
+            node = TaskNode(id="b", brief="b", artifact="out/b.md", gates=["nonempty"], depends_on=["dep1"])
+            prom = _promotions_of(node, run_dir)
+            self.assertIn("handover note", prom)
+
 
 if __name__ == "__main__":
     unittest.main()

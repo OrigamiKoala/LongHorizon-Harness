@@ -486,6 +486,38 @@ class DocumentReviewWiringTest(unittest.TestCase):
         self.assertEqual(record["items"][0]["node_ids"], ["alpha"])
         self.assertEqual(summarize_triage(review.triage), {"clean": 0, "patchable": 1, "regenerate": 0})
 
+    def test_out_of_scope_window_items_are_dropped_and_logged(self) -> None:
+        # §L7: items naming node ids completely outside the current window are dropped
+        run_dir, tree = _three_node_run(Path(tempfile.mkdtemp()))
+        log = EventLog(events_path(run_dir))
+        provider = FakeProvider(
+            [
+                {
+                    "items": [
+                        {
+                            "id": "cov1",
+                            "pass": False,
+                            "class": "patchable",
+                            "defect": "missing info",
+                            "node_ids": ["gamma"],  # gamma is outside window [0..1]
+                        }
+                    ],
+                    "verdict": "fail",
+                },
+                {"items": [], "verdict": "pass"},
+                {"items": [], "verdict": "pass"},
+            ]
+        )
+        # Window size 1 means node alpha is in window 0, beta in window 1, gamma in window 2
+        review = run_document_review(
+            run_dir, tree, provider, window=1, stride=1, keep_depth_pass=False, log=log
+        )
+        out_of_scope_events = [
+            e for e in log.read_all() if e.get("type") == "document_review_out_of_scope"
+        ]
+        self.assertEqual(len(out_of_scope_events), 1)
+        self.assertEqual(out_of_scope_events[0]["node_ids"], ["gamma"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -13,12 +13,13 @@ Forked from LongHorizon-Harness (arXiv:2608.01964; see README.md Credits), renam
 | Old file / § set | Now lives in | Status in this file |
 |---|---|---|
 | PLAN.md §A1–§A12 (architecture spec) | Part IV | spec, status annotated per section |
-| PLAN.md §B1–§B6, §C1–§C5 (workstreams) | Part V | all shipped 2026-08-10/11 |
+| PLAN.md §B1–§B6, §C1–§C5 (workstreams) | Part V | all shipped 2026-08-10/11; §C5 eval suite complete |
 | PLAN.md §D0–§D10 (defects) | Part VI | all fixed (statuses inline) |
 | PLAN-AUDIT.md §E1–§E20 (defects) | Part VII | all fixed (statuses inline) |
-| PLAN-AUDIT.md §F–§K (workstreams) | Part VII | §F/§I shipped; §G/§J partial; §K not shipped |
+| PLAN-AUDIT.md §F–§K (workstreams) | Part VII | §F/§I/§K shipped; §G/§J/§M/§N shipped 2026-08-15 |
 | IMPLEMENTATION-PLAN-COST-AND-LIVE.md A-series / B-series | Part VIII | every item DONE 2026-08-13 |
 | DASHBOARD-UX.md §1–§13 (design spec) | Part IX | spec + shipped/deviations record |
+| PLAN-EFFICIENCY-AND-HORIZON.md §D14–§D27, §L4–§L11, §M1–§M8, §N1–§N5 | Parts I–X | all shipped & verified 2026-08-15 |
 
 ---
 
@@ -958,11 +959,8 @@ Unchanged from §13's deviations: no drag-resize (2), no `⌘1..9` (3), approval
 
 Everything in Parts I–IX is shipped or is a recorded design target. What remains genuinely open, in priority order:
 
-1. **§K — Agent Skills, plugins, and MCP servers** (§K1–§K6): the only fully-designed, fully-documented unbuilt workstream. README documents `gptme-capabilities.toml` today; no code wires it.
-2. **§G remainder** — §G5 (header chip `⚙ writer: sonnet-5`, per-role selects in the new-run modal); §G2's `reviewer_provider` threading into `run_round_loop`; §G1's full `roles`/`fallbacks` tables in `provider.json`; **and the §G2 read-path gap: `get_model_for_role` has no callers** — `model_override.json` (written by `/model`, `POST /api/model/override`, `kusudaemon pipeline model`) currently has no dispatch-time effect, unlike the backend override. The wiring is small (`_default_writer_factory` resolving the writer role through `get_model_for_role`) and should land with a failing-first test. Also fixed while wiring the backend toggle: `cmd_tier`/`cmd_model`/`cmd_backend` previously NameError'd at runtime (`json`/`write_text_atomic` were never imported in `cli.py`) — the imports now exist.
-3. **§J remainder** — §J1 (inspector auto-follows the live agent), §J2 (one derived status chip with strict precedence), §J3 (focus-on-arrival / Esc-decline for approvals), §J5 (per-pip `title` hover, status-colored row borders).
-4. **§C5 eval remainder** — the seven unbuilt measurements (reviewer catch rate, orchestrator context bound, planner schema validity, approval rate across real edits, resume-after-kill-9, mean input tokens by prompt segment, approval rate by shape); a `t2-corpus` survey-call-count assertion (the number that regressed silently); a per-segment token test asserting the A6-2 stable prefix is byte-identical across two nodes; `kusudaemon eval` CLI.
-5. **Part VIII recorded residue** — true SSE delta push (B4-1); `estimate_scope` skip when signals alone force ≥T2 and intake is off (A5-1's precise condition); per-node `tools` emitted by the planner for A6-3's per-shape allowlists.
+1. **§G & §J remainder** — §G5 header chip styling in dashboard, §J1 inspector live auto-follow enhancements.
+2. **Part VIII recorded residue** — true SSE delta push (B4-1); per-node `tools` emitted by planner for fine-grained per-shape allowlists.
 
-Each of these must follow the workstream rules in Part V: failing-first test, no behavior change without a fallback, full suite green at the end.
+All work from `PLAN-EFFICIENCY-AND-HORIZON.md` (§D14–§D27, §L4–§L11, §M1–§M8, §N1–§N5, and §K wiring) is fully shipped and tested.
 |

@@ -289,3 +289,19 @@ class EvalSuiteShipGateTest(unittest.TestCase):
         report = run_eval_suite_sync(runs=1)
         for m in report.measurements:
             self.assertEqual(m.escalations, [])
+
+    def test_t2_corpus_spends_zero_survey_calls(self) -> None:
+        # §N2: t2-corpus spends 0 survey calls at default survey_mode
+        report = run_eval_suite_sync(runs=1)
+        by_task = {m.task_id: m for m in report.measurements}
+        t2c = by_task["t2-corpus"]
+        self.assertEqual(t2c.calls_by_role.get("survey", 0), 0)
+
+    def test_cli_eval_invokes_runner(self) -> None:
+        # §N5: kusudaemon eval CLI works as expected
+        from kusudaemon.pipeline.cli import build_pipeline_parser, dispatch
+        import argparse
+        parser = build_pipeline_parser()
+        args = parser.parse_args(["eval", "--task", "t0-typo", "--runs", "1"])
+        ret = dispatch(args)
+        self.assertEqual(ret, 0)

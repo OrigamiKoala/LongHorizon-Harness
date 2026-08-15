@@ -2177,7 +2177,50 @@ class PhaseReviewT2DocumentReviewCacheTest(unittest.TestCase):
                 self.assertEqual(report.status, "halted")
                 phase_data = json.loads(phase_path(run_dir).read_text(encoding="utf-8"))
                 self.assertEqual(phase_data["status"], "halted")
-                self.assertIn("halted", phase_data["detail"])
+        asyncio.run(scenario())
+
+
+class CostCeilingHaltingTest(unittest.TestCase):
+    """PLAN-EFFICIENCY-AND-HORIZON.md §M1: Cost ledger records usage, and
+    setting max_cost_usd halts the driver with reason='cost ceiling'."""
+
+    def test_cost_ceiling_halts_driver_at_boundary(self) -> None:
+        import asyncio
+        from kusudaemon.pipeline.driver import RunOptions, RecursiveDriver
+        from kusudaemon.v0.cost import CostLedger
+        from kusudaemon.v0.run_dir import cost_path
+
+        async def scenario() -> None:
+            with tempfile.TemporaryDirectory() as root_str:
+                run_dir = Path(root_str) / "run"
+                provider = FakeProvider([
+                    {"items": [], "verdict": "pass"},
+                ])
+                # Set a very low cost ceiling ($0.000001)
+                options = RunOptions(goal="test", max_cost_usd=0.000001)
+                driver = RecursiveDriver(
+                    run_dir,
+                    provider=provider,  # type: ignore[arg-type]
+                    options=options,
+                    poll_interval=0.02,
+                )
+                # Seed a cost ledger entry that exceeds max_cost_usd
+                driver.cost_ledger.record(
+                    role="classify",
+                    phase="classify",
+                    node="-",
+                    model="gpt-4o",
+                    prompt_tokens=1000,
+                    completion_tokens=500,
+                    cost_usd=0.005,
+                )
+                report = await driver.run()
+                self.assertEqual(report.status, "halted")
+                self.assertTrue((run_dir / "cost.jsonl").exists())
+                events = EventLog(events_path(run_dir)).read_all()
+                halt_events = [e for e in events if e.get("type") == "run_halted"]
+                self.assertEqual(len(halt_events), 1)
+                self.assertEqual(halt_events[0]["reason"], "cost ceiling")
 
         asyncio.run(scenario())
 

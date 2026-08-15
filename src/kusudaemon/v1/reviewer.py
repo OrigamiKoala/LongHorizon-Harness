@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 from ..roles.protocol import RoleProvider
 from .gates import estimate_tokens
@@ -94,6 +94,23 @@ class ReviewVerdict:
     # node's audit record with `truncated=True` is now the honest signal
     # that content genuinely went unseen, not a byproduct of size alone.
     truncated: bool = False
+
+
+def compute_verdict_digest(
+    artifact_text: str,
+    rubric: dict[str, str],
+    judgment: list[str],
+    contract_text: str = "",
+) -> str:
+    """PLAN-EFFICIENCY-AND-HORIZON.md §L6: deterministic digest over artifact,
+    rubric, and contract for caching passing review verdicts."""
+    import hashlib
+
+    sorted_rubric = "\n".join(
+        f"{k}:{rubric.get(k, '')}" for k in sorted(judgment)
+    )
+    payload = f"{artifact_text}\n{sorted_rubric}\n{contract_text}".encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def cap_artifact_text(text: str, ceiling_tokens: int) -> str:
@@ -174,8 +191,11 @@ def _group_sections(sections: list[str], max_groups: int) -> list[str]:
 
 
 def _call_reviewer(
-    rubric_lines: str, artifact_text: str, provider: RoleProvider,
+    rubric_lines: str,
+    artifact_text: str,
+    provider: RoleProvider,
     on_reasoning: Callable[[str], None] | None = None,
+    temperature: float = 0.0,
 ) -> dict[str, Any]:
     messages = [
         {"role": "system", "content": _SYSTEM_PROMPT},
@@ -184,7 +204,12 @@ def _call_reviewer(
             "content": f"Rubric:\n{rubric_lines}\n\nArtifact:\n{artifact_text}",
         },
     ]
-    return provider.complete_json(messages, VERDICT_SCHEMA, on_reasoning=on_reasoning)
+    return provider.complete_json(
+        messages,
+        VERDICT_SCHEMA,
+        temperature=temperature,
+        on_reasoning=on_reasoning,
+    )
 
 
 def review_node(
@@ -194,6 +219,7 @@ def review_node(
     *,
     artifact_cap_tokens: int = DEFAULT_ARTIFACT_CAP_TOKENS,
     on_reasoning: Callable[[str], None] | None = None,
+    temperature: float = 0.0,
 ) -> ReviewVerdict:
     """PLAN.md §A9/§B6: fan-out replaces whole-artifact truncation.
 
@@ -236,7 +262,13 @@ def review_node(
 
     capped_artifact = cap_artifact_text(artifact_text, artifact_cap_tokens)
     if capped_artifact == artifact_text:
-        payload = _call_reviewer(rubric_lines, artifact_text, provider, on_reasoning=on_reasoning)
+        payload = _call_reviewer(
+            rubric_lines,
+            artifact_text,
+            provider,
+            on_reasoning=on_reasoning,
+            temperature=temperature,
+        )
         return ReviewVerdict(
             node_id=node.id,
             items=list(payload.get("items", [])),

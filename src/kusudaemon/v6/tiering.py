@@ -48,6 +48,7 @@ from typing import Any, Callable, Literal
 
 from ..v1.gates import estimate_tokens
 from ..roles.protocol import RoleProvider
+from ..v2.intake import QuestionSet
 from .work_object import WorkObject, iter_workspace_paths
 
 Tier = Literal["T0", "T1", "T2", "T3"]
@@ -286,7 +287,7 @@ def estimate_scope_full(
     *,
     on_reasoning: Callable[[str], None] | None = None,
     streaming: bool = False,
-) -> tuple[ScopeEstimate, "QuestionSet"]:
+) -> tuple[ScopeEstimate, QuestionSet]:
     """A5-2: the merged classify + intake-round-1 call — one
     ``complete_json`` where the legacy ``estimate_scope`` plus a
     ``build_question_set`` round-trip used to be two. Returns the
@@ -294,12 +295,8 @@ def estimate_scope_full(
     structured output so ``classify``'s T0 check keeps working) and the
     round-1 ``QuestionSet`` the driver stores in ``tier.json`` so a resume
     can re-ask the exact same questions without re-calling the model.
-
-    Imported lazily: ``QuestionSet`` lives in v2/intake.py, and this
-    module is imported by the CLI's tier command too — the type is only
-    needed where the merged call is actually used.
     """
-    from ..v2.intake import IntakeObjection, IntakeQuestion, QuestionSet
+    from ..v2.intake import IntakeObjection, IntakeQuestion
 
     messages = [
         {"role": "system", "content": _FULL_SCOPE_SYSTEM_PROMPT},
@@ -364,7 +361,7 @@ def _classify_raw(signals: Signals, estimate: ScopeEstimate) -> Tier:
         and signals.work_tokens < _T2_WORK_TOKENS_CEILING
     ):
         return "T1"
-    if estimate.artifacts <= 8 or signals.work_tokens < _T2_WORK_TOKENS_CEILING:
+    if estimate.artifacts <= 8 and signals.work_tokens < _T2_WORK_TOKENS_CEILING:
         return "T2"
     return "T3"
 

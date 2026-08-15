@@ -238,6 +238,24 @@ def build_tasks() -> tuple[EvalTask, ...]:
             },
         ),
         EvalTask(
+            task_id="t2-large-corpus",
+            goal="Write a summary primer across the 60 chapters in the corpus.",
+            expected_tier="T2",
+            estimate={
+                "files_touched": "few",
+                "artifacts": 5,
+                "answerable_without_exploration": True,
+                "questions": [],
+                "objections": [],
+            },
+            plan=_corpus_plan([(f"sec-{i}", f"Summarize section {i}") for i in range(5)]),
+            corpus="# Textbook\n\n" + ("Section text filler.\n\n" * 100),
+            spine_units=tuple(
+                (f"unit-{i:02d}", f"Section {i}", i, i, 2000)
+                for i in range(60)
+            ),
+        ),
+        EvalTask(
             task_id="t3-refactor",
             goal=T3_REFACTOR_GOAL,
             expected_tier="T3",

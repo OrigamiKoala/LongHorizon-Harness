@@ -130,10 +130,26 @@ def build_pipeline_parser() -> argparse.ArgumentParser:
     resume_parser = sub.add_parser("resume", help="Resume a run after a halt or crash.")
     resume_parser.add_argument("run_id")
     resume_parser.add_argument("--runs-root", default=_RUNS_ROOT_DEFAULT)
+    resume_parser.add_argument("--replan-under-budget", action="store_true", help="Replan remaining tasks under a tighter budget when resuming.")
 
     status_parser = sub.add_parser("status", help="Print phase, tree, and pending approvals.")
     status_parser.add_argument("run_id")
     status_parser.add_argument("--runs-root", default=_RUNS_ROOT_DEFAULT)
+    status_parser.add_argument("--brief", action="store_true", help="Print the operator resumption brief (§M7).")
+
+    resync_parser = sub.add_parser("resync", help="Re-sync a run with changed source content (§M8).")
+    resync_parser.add_argument("run_id")
+    resync_parser.add_argument("--source", required=True, help="Path to new source document.")
+    resync_parser.add_argument("--runs-root", default=_RUNS_ROOT_DEFAULT)
+
+    cache_parser = sub.add_parser("cache", help="Manage episode cache (§M3).")
+    cache_sub = cache_parser.add_subparsers(dest="cache_command")
+    cache_clear = cache_sub.add_parser("clear", help="Clear all entries in the episode cache.")
+    cache_clear.add_argument("--runs-root", default=_RUNS_ROOT_DEFAULT)
+
+    eval_parser = sub.add_parser("eval", help="Run the eval suite (§N5).")
+    eval_parser.add_argument("--task", default=None, help="Specific task ID to run.")
+    eval_parser.add_argument("--runs", type=int, default=1, help="Number of repetitions per task.")
 
     approve_parser = sub.add_parser("approve", help="Resolve the oldest pending approval.")
     approve_parser.add_argument("run_id")
@@ -145,8 +161,8 @@ def build_pipeline_parser() -> argparse.ArgumentParser:
     amend_parser = sub.add_parser("amend", help="Amend the contract and run the re-validation pass.")
     amend_parser.add_argument("run_id")
     amend_parser.add_argument("--runs-root", default=_RUNS_ROOT_DEFAULT)
-    amend_parser.add_argument("--text", required=True, help="The rule text to append to the contract.")
-    amend_parser.add_argument("--reason", default="CLI amendment", help="Attribution shown in the contract.")
+    amend_parser.add_argument("--text", required=True, help="New contract rule text.")
+    amend_parser.add_argument("--reason", default="", help="Why the rule was added.")
     amend_parser.add_argument("--yes", action="store_true", help="Apply the triage without prompting.")
     amend_parser.add_argument("--max-attempts", type=int, default=3)
 
@@ -321,6 +337,11 @@ def cmd_status(argv: argparse.Namespace) -> int:
     run_dir = _require_existing_run(argv.runs_root, argv.run_id)
     if run_dir is None:
         return 1
+    if getattr(argv, "brief", False):
+        resumption_file = run_dir / "assembly" / "resumption.md"
+        if resumption_file.exists():
+            print(resumption_file.read_text(encoding="utf-8").strip())
+            return 0
     import json
 
     phase: dict = {}
@@ -350,6 +371,94 @@ def cmd_status(argv: argparse.Namespace) -> int:
         print(f"contract: {len(contract_path(run_dir).read_text(encoding='utf-8').splitlines())} lines")
     events = EventLog(events_path(run_dir))
     print(f"events:   {len(events.read_all())} recorded")
+    from ..v0.cost import CostLedger
+    from ..v0.run_dir import cost_path
+    cost_file = cost_path(run_dir)
+    if cost_file.exists():
+        totals = CostLedger(cost_file).totals()
+        print(f"cost:     ${totals['cost_usd']:.4f} ({totals['total_tokens']:,} tokens)")
+    return 0
+
+
+def cmd_resync(argv: argparse.Namespace) -> int:
+    """PLAN-EFFICIENCY-AND-HORIZON.md §M8: Re-sync run with changed source."""
+    run_dir = _require_existing_run(argv.runs_root, argv.run_id)
+    if run_dir is None:
+        return 1
+    new_source_path = Path(argv.source)
+    if not new_source_path.is_file():
+        print(f"source file not found: {new_source_path}", file=sys.stderr)
+        return 1
+    new_source_text = new_source_path.read_text(encoding="utf-8")
+
+    spine_file = run_dir / "spine.json"
+    old_spine = []
+    if spine_file.exists():
+        from ..v2.survey import SpineUnit
+        old_spine = [SpineUnit.from_dict(d) for d in json.loads(spine_file.read_text(encoding="utf-8"))]
+
+    from ..v2.survey import survey_chunks, save_spine
+    new_units = survey_chunks(new_source_text)
+
+    old_by_id = {u.id: u for u in old_spine}
+    changed_unit_ids = set()
+    for u in new_units:
+        if u.id not in old_by_id or old_by_id[u.id].tokens != u.tokens or old_by_id[u.id].label != u.label:
+            changed_unit_ids.add(u.id)
+
+    t_path = tree_path(run_dir)
+    stale_nodes: set[str] = set()
+    if t_path.exists():
+        tree = TaskTree.load(t_path)
+        for node in tree.nodes.values():
+            if any(any(uid in inp for uid in changed_unit_ids) for inp in node.inputs):
+                stale_nodes.add(node.id)
+
+        changed = True
+        while changed:
+            changed = False
+            for node in tree.nodes.values():
+                if node.id not in stale_nodes:
+                    if any(dep in stale_nodes for dep in node.depends_on):
+                        stale_nodes.add(node.id)
+                        changed = True
+
+        for nid in stale_nodes:
+            tree.nodes[nid].status = "stale"
+        tree.save(t_path)
+        print(f"resynced run {argv.run_id}: {len(stale_nodes)} nodes marked stale ({', '.join(sorted(stale_nodes)) if stale_nodes else 'none'})")
+
+    write_text_atomic(source_path(run_dir), new_source_text)
+    save_spine(new_units, spine_file)
+    events = EventLog(events_path(run_dir))
+    events.append({
+        "node_id": "-",
+        "role": "harness",
+        "type": "run_resynced",
+        "changed_units": list(sorted(changed_unit_ids)),
+        "stale_nodes": list(sorted(stale_nodes)),
+        "ts": time.time(),
+    })
+    return 0
+
+
+def cmd_cache(argv: argparse.Namespace) -> int:
+    """PLAN-EFFICIENCY-AND-HORIZON.md §M3: Manage episode cache."""
+    from ..v0.episode_cache import EpisodeCache
+    cache_dir = resolve_runs_root(argv.runs_root) / "cache"
+    cache = EpisodeCache(cache_dir)
+    if getattr(argv, "cache_command", None) == "clear":
+        count = cache.clear()
+        print(f"cleared {count} entries from {cache_dir}")
+        return 0
+    print("unknown cache command", file=sys.stderr)
+    return 1
+
+
+def cmd_eval(argv: argparse.Namespace) -> int:
+    from ..eval.runner import run_eval
+    report = run_eval(task_id=argv.task, runs=argv.runs)
+    report.print_summary()
     return 0
 
 
@@ -564,6 +673,12 @@ def dispatch(args: argparse.Namespace) -> int:
         return cmd_resume(args)
     if command == "status":
         return cmd_status(args)
+    if command == "resync":
+        return cmd_resync(args)
+    if command == "cache":
+        return cmd_cache(args)
+    if command == "eval":
+        return cmd_eval(args)
     if command == "approve":
         return cmd_approve(args)
     if command == "amend":

@@ -128,7 +128,7 @@ def execute_websearch(
     code: str | None,
     args: list[str] | None,
     kwargs: dict[str, str] | None,
-) -> Generator["Message", None, None]:
+) -> Generator[Any, None, None]:
     from gptme.message import Message  # local import: only needed inside gptme's process
 
     query = ""

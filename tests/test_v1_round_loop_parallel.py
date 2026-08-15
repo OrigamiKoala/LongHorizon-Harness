@@ -135,10 +135,11 @@ class ParallelWaveTest(unittest.TestCase):
             run_dir = create_run_dir(root, "run3")
             prompt_dir = root / "prompts"
             prompt_dir.mkdir(parents=True, exist_ok=True)
-            _independent_tree(run_dir, ["a", "b", "c"])
+            _independent_tree(run_dir, ["a", "b", "c", "d"])
 
-            # Model policy, but ONLY one canned decision: the wave must
-            # pick b and c from the ready set by code, zero extra calls.
+            # Model policy, ready=4 > max_parallel=3: 1 model call for round 1
+            # (picks a, wave-fills b and c); round 2 has 1 ready node (d) which
+            # is code-decided with zero calls. Total calls = 1.
             provider = FakeProvider(
                 [{"action": "dispatch", "node_id": "a", "reason": "model picked a"}]
             )
@@ -152,21 +153,43 @@ class ParallelWaveTest(unittest.TestCase):
             self.assertEqual(tree.nodes["a"].status, "passed")
             self.assertEqual(tree.nodes["b"].status, "passed")
             self.assertEqual(tree.nodes["c"].status, "passed")
+            self.assertEqual(tree.nodes["d"].status, "passed")
             self.assertEqual(len(provider.calls), 1)
 
-            # Real concurrency: three 0.3s subprocess episodes on one wave
+            # Real concurrency: three 0.3s subprocess episodes on wave 1
             # finish well before the 0.9s they'd need sequentially.
-            self.assertLess(elapsed, 0.8)
+            self.assertLess(elapsed, 1.2)
 
-            # All three share one round; the wave fill is recorded as such.
             events = EventLog(events_path(run_dir)).read_all()
             decisions = [e for e in events if e["type"] == "node_dispatch_decided"]
-            self.assertEqual(len(decisions), 3)
-            self.assertEqual(len({e["round"] for e in decisions}), 1)
+            self.assertEqual(len(decisions), 4)
             reasons = {e["node_id"]: e["reason"] for e in decisions}
             self.assertEqual(reasons["a"], "model picked a")
             self.assertIn("parallel wave fill", reasons["b"])
             self.assertIn("parallel wave fill", reasons["c"])
+
+    def test_wave_consumes_entire_ready_set_spends_zero_calls(self) -> None:
+        # §L5: when max_parallel >= len(ready), orchestrator makes zero model calls
+        with tempfile.TemporaryDirectory() as root_str:
+            root = Path(root_str)
+            run_dir = create_run_dir(root, "run3-zero")
+            prompt_dir = root / "prompts"
+            prompt_dir.mkdir(parents=True, exist_ok=True)
+            _independent_tree(run_dir, ["a", "b", "c"])
+
+            provider = FakeProvider([])  # Zero canned responses
+            tree = asyncio_run(
+                run_dir, prompt_dir, root, provider, max_parallel=3,
+            )
+            self.assertEqual(tree.nodes["a"].status, "passed")
+            self.assertEqual(tree.nodes["b"].status, "passed")
+            self.assertEqual(tree.nodes["c"].status, "passed")
+            self.assertEqual(len(provider.calls), 0)
+
+            events = EventLog(events_path(run_dir)).read_all()
+            decisions = [e for e in events if e["type"] == "node_dispatch_decided"]
+            self.assertEqual(len(decisions), 3)
+            self.assertIn("wave consumes the entire ready set", decisions[0]["reason"])
 
     def test_resume_scan_gathers_crashed_in_flight_nodes(self) -> None:
         with tempfile.TemporaryDirectory() as root_str:
@@ -204,6 +227,21 @@ class ParallelWaveTest(unittest.TestCase):
             # Resume completed them without any new dispatch decision.
             events = EventLog(events_path(run_dir)).read_all()
             self.assertEqual([e for e in events if e["type"] == "node_dispatch_decided"], [])
+
+    def test_no_bare_tree_save_outside_save_tree_locked(self) -> None:
+        # §D19: round_loop.py must never call tree.save() directly; always _save_tree_locked
+        round_loop_src = (_REPO_ROOT / "src" / "kusudaemon" / "v1" / "round_loop.py").read_text(encoding="utf-8")
+        # Split by function defs to verify where tree.save appears
+        outside_locked = []
+        in_locked_func = False
+        for line in round_loop_src.splitlines():
+            if line.startswith("def _save_tree_locked(") or line.startswith("async def _save_tree_locked("):
+                in_locked_func = True
+            elif line.startswith("def ") or line.startswith("async def ") or line.startswith("class "):
+                in_locked_func = False
+            if "tree.save(" in line and not in_locked_func:
+                outside_locked.append(line)
+        self.assertEqual(outside_locked, [])
 
 
 def asyncio_run(run_dir, prompt_dir, root, provider, *, max_parallel, work_delay=0.0, dispatch_policy="model"):

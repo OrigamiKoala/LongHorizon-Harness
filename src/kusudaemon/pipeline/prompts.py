@@ -31,6 +31,7 @@ import json
 import os
 import threading
 from pathlib import Path
+from typing import Any, Callable
 
 from ..adapters.cli_agent import (
     _hidden_path_exceptions_block,
@@ -166,22 +167,136 @@ def _artifact_instruction(node: TaskNode, run_dir: Path) -> str:
 
 
 
+_MANIFEST_CACHE_MAX = 64
+_manifest_cache: dict[str, tuple[tuple[int, int] | None, dict[str, str]]] = {}
+_manifest_lock = threading.Lock()
+
+
 def _promotions_of(node: TaskNode, run_dir: Path) -> str:
     if not node.depends_on:
         return ""
-    entries = read_all_manifest_entries(run_dir / "manifest.jsonl")
-    latest_by_node: dict[str, str] = {}
-    for entry in entries:
-        node_id = str(entry.get("node") or "").strip()
-        promotion = str(entry.get("promotion") or "").strip()
-        if node_id and promotion:
-            latest_by_node[node_id] = promotion
+    m_path = run_dir / "manifest.jsonl"
+    key = str(m_path)
+    try:
+        stat = os.stat(m_path)
+        stamp: tuple[int, int] | None = (stat.st_size, stat.st_mtime_ns)
+    except OSError:
+        stamp = None
+
+    with _manifest_lock:
+        cached = _manifest_cache.get(key)
+        if cached is not None and cached[0] == stamp:
+            latest_by_node = cached[1]
+        else:
+            latest_by_node = None
+
+    if latest_by_node is None:
+        entries = read_all_manifest_entries(m_path)
+        latest_by_node = {}
+        for entry in entries:
+            node_id = str(entry.get("node") or "").strip()
+            promotion = str(entry.get("promotion") or "").strip()
+            if node_id and promotion:
+                latest_by_node[node_id] = promotion
+        with _manifest_lock:
+            if key not in _manifest_cache and len(_manifest_cache) >= _MANIFEST_CACHE_MAX:
+                del _manifest_cache[next(iter(_manifest_cache))]
+            _manifest_cache[key] = (stamp, latest_by_node)
+
     lines: list[str] = []
     for dep_id in node.depends_on:
         promotion = latest_by_node.get(dep_id)
         if promotion:
             lines.append(f"- [{dep_id}] {promotion}")
     return "\n".join(lines)
+
+
+def segments(
+    node: TaskNode,
+    run_dir: str | Path,
+    *,
+    inline_spans: bool = False,
+    top_k: int = DEFAULT_TOP_K,
+    hidden_paths: tuple[str, ...] = (),
+    hidden_path_exceptions: tuple[str, ...] = (),
+) -> list[tuple[str, str]]:
+    """Return the ordered list of (label, text) segments making up a Writer's
+    prompt (PLAN-EFFICIENCY-AND-HORIZON.md §L10)."""
+    run_dir = Path(run_dir)
+    segs: list[tuple[str, str]] = []
+
+    def add(label: str, text: str) -> None:
+        text = text.strip()
+        if text:
+            segs.append((label, text))
+
+    goal_block = _goal_and_rubric_block(run_dir)
+    if goal_block:
+        add("goal_and_rubric", goal_block)
+    contract = _load_contract_cached(run_dir).strip()
+    if contract:
+        add(
+            "contract",
+            "Global contract — every artifact you produce must satisfy it:\n" + contract,
+        )
+    add("hidden_paths", _hidden_paths_notice_block(hidden_paths))
+    add("hidden_path_exceptions", _hidden_path_exceptions_block(hidden_path_exceptions))
+    add("artifact_instruction", _artifact_instruction(node, run_dir))
+    if node.judgment and node.rubric:
+        rubric_lines = "\n".join(
+            f"- {judgment_id}: {node.rubric[judgment_id]}"
+            for judgment_id in node.judgment
+            if judgment_id in node.rubric
+        )
+        add("judgment_rubric", f"Judgment rubric the Reviewer will hold you to:\n{rubric_lines}")
+    add("brief", f"Your brief: {node.brief}")
+    if node.inputs:
+        def _abs(item: str) -> str:
+            return str(resolve_stored(run_dir, item))
+
+        if inline_spans:
+            spans_block = _retrieved_spans_block(node, run_dir, top_k)
+            if spans_block is not None:
+                finding_paths = _non_unit_inputs(node, run_dir)
+                if finding_paths:
+                    add(
+                        "inputs",
+                        "Inputs (read them with your tools before writing, and "
+                        "cite them where relevant):\n"
+                        + "\n".join(f"- {_abs(item)}" for item in finding_paths),
+                    )
+                add("spans", spans_block)
+            else:
+                add(
+                    "inputs",
+                    "Inputs (read them with your tools before writing, and cite "
+                    "them where relevant):\n"
+                    + "\n".join(f"- {_abs(item)}" for item in node.inputs),
+                )
+        else:
+            add(
+                "inputs",
+                "Inputs (read them with your tools before writing, and cite them "
+                "where relevant):\n" + "\n".join(f"- {_abs(item)}" for item in node.inputs),
+            )
+    promotions = _promotions_of(node, run_dir)
+    if promotions:
+        add(
+            "promotions",
+            "Upstream nodes' handoffs (what the nodes you depend on actually "
+            "delivered — read them before writing):\n" + promotions,
+        )
+    if node.last_defect:
+        instruction = _PATCH_RETRY_INSTRUCTION if node.attempts <= 1 else _REGENERATE_RETRY_INSTRUCTION
+        retry_block = instruction + node.last_defect
+        prior_artifact = _prior_attempt_artifact(node, run_dir)
+        if prior_artifact is not None:
+            retry_block += (
+                "\n\nYour previous artifact (fix it in place, then save the "
+                f"corrected version over it):\n\n{prior_artifact}"
+            )
+        add("retry", retry_block)
+    return segs
 
 
 def build_node_prompt(
@@ -211,102 +326,18 @@ def build_node_prompt(
     ``backends.build_writer_adapter`` hands the adapter — the notice used
     to be appended by ``cli_agent.run_episode`` after ALL of this, which
     put its constant ~120 tokens outside every cached prefix (§A6-1)."""
-    run_dir = Path(run_dir)
-    segments: list[tuple[str, str]] = []
-
-    def add(label: str, text: str) -> None:
-        text = text.strip()
-        if text:
-            segments.append((label, text))
-
-    goal_block = _goal_and_rubric_block(run_dir)
-    if goal_block:
-        add("goal_and_rubric", goal_block)
-    contract = _load_contract_cached(run_dir).strip()
-    if contract:
-        add(
-            "contract",
-            "Global contract — every artifact you produce must satisfy it:\n" + contract,
-        )
-    add("hidden_paths", _hidden_paths_notice_block(hidden_paths))
-    add("hidden_path_exceptions", _hidden_path_exceptions_block(hidden_path_exceptions))
-    add("artifact_instruction", _artifact_instruction(node, run_dir))
-    if node.judgment and node.rubric:
-        rubric_lines = "\n".join(
-            f"- {judgment_id}: {node.rubric[judgment_id]}"
-            for judgment_id in node.judgment
-            if judgment_id in node.rubric
-        )
-        add("judgment_rubric", f"Judgment rubric the Reviewer will hold you to:\n{rubric_lines}")
-    add("brief", f"Your brief: {node.brief}")
-    if node.inputs:
-        # §D0b: a path stored on a node (a materialized spine unit, a v4
-        # finding) is relative to run_dir; render it absolute so "read them
-        # with your tools" resolves correctly regardless of the agent's own
-        # cwd (workspace mode makes that the target repo root, not run_dir).
-        def _abs(item: str) -> str:
-            return str(resolve_stored(run_dir, item))
-
-        if inline_spans:
-            spans_block = _retrieved_spans_block(node, run_dir, top_k)
-            if spans_block is not None:
-                finding_paths = _non_unit_inputs(node, run_dir)
-                if finding_paths:
-                    add(
-                        "inputs",
-                        "Inputs (read them with your tools before writing, and "
-                        "cite them where relevant):\n"
-                        + "\n".join(f"- {_abs(item)}" for item in finding_paths),
-                    )
-                add("spans", spans_block)
-            else:
-                # Index missing, or nothing retrieved: silent per-node
-                # fallback to today's path-list rendering (PLAN-zeromem.md
-                # §4.4) — unlike §3's phase-level fallback, this is per-node
-                # and would spam events.jsonl.
-                add(
-                    "inputs",
-                    "Inputs (read them with your tools before writing, and cite "
-                    "them where relevant):\n"
-                    + "\n".join(f"- {_abs(item)}" for item in node.inputs),
-                )
-        else:
-            add(
-                "inputs",
-                "Inputs (read them with your tools before writing, and cite them "
-                "where relevant):\n" + "\n".join(f"- {_abs(item)}" for item in node.inputs),
-            )
-    promotions = _promotions_of(node, run_dir)
-    if promotions:
-        add(
-            "promotions",
-            "Upstream nodes' handoffs (what the nodes you depend on actually "
-            "delivered — read them before writing):\n" + promotions,
-        )
-    if node.last_defect:
-        # node.attempts is already incremented (by round_loop's transition)
-        # before a retry is redispatched, so attempts==1 is building the
-        # prompt for the node's 2nd dispatch, attempts>=2 for its 3rd+.
-        instruction = _PATCH_RETRY_INSTRUCTION if node.attempts <= 1 else _REGENERATE_RETRY_INSTRUCTION
-        # A6-5 (IMPLEMENTATION-PLAN-COST-AND-LIVE.md): retries otherwise
-        # re-pay everything — attempt 2+ is a fresh subprocess that re-sends
-        # the system prompt, contract, brief, and re-reads every input,
-        # including a `read` turn to fetch its own previous artifact. Inline
-        # the prior artifact text so a patch-framed retry can fix it in
-        # place without that round trip (capped: the full prior artifact is
-        # on disk at out/<node>.md if the model needs more).
-        retry_block = instruction + node.last_defect
-        prior_artifact = _prior_attempt_artifact(node, run_dir)
-        if prior_artifact is not None:
-            retry_block += (
-                "\n\nYour previous artifact (fix it in place, then save the "
-                f"corrected version over it):\n\n{prior_artifact}"
-            )
-        add("retry", retry_block)
+    segs = segments(
+        node,
+        run_dir,
+        inline_spans=inline_spans,
+        top_k=top_k,
+        hidden_paths=hidden_paths,
+        hidden_path_exceptions=hidden_path_exceptions,
+    )
     if segment_tokens is not None:
-        for label, text in segments:
+        for label, text in segs:
             segment_tokens(label, estimate_tokens(text))
-    return "\n\n".join(text for _, text in segments)
+    return "\n\n".join(text for _, text in segs)
 
 
 def _prior_attempt_artifact(node: TaskNode, run_dir: Path) -> str | None:

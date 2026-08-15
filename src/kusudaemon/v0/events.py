@@ -69,6 +69,26 @@ class EventLog:
                     continue
         return events
 
+    def read_tail(self, n: int = 200) -> list[dict[str, Any]]:
+        """PLAN-EFFICIENCY-AND-HORIZON.md §D22: Read the last n events from the
+        log without keeping the entire history in memory."""
+        if not self.path.exists():
+            return []
+        import collections
+        lines = collections.deque(maxlen=n)
+        with open(self.path, "r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if line:
+                    lines.append(line)
+        events: list[dict[str, Any]] = []
+        for line in lines:
+            try:
+                events.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+        return events
+
     @staticmethod
     def scan(
         events: list[dict[str, Any]], node_id: str, event_type: str

@@ -70,6 +70,16 @@ class WriterAdapterToolAllowlistTest(unittest.TestCase):
         self.assertEqual(adapter.tool_allowlist, ("read", str(SEARXNG_TOOL_PATH)))
         self.assertEqual(adapter.tool_allowlist.count(str(SEARXNG_TOOL_PATH)), 1)
 
+    def test_always_grant_web_search_false_narrows_tools(self) -> None:
+        # §D25: always_grant_web_search=False does not add web search unless node requested it
+        node = TaskNode(id="n", brief="b", artifact="out/n.md", gates=["nonempty"], tools=["read"])
+        with _EnvGuard():
+            adapter = build_writer_adapter(
+                "gptme", workspace_path="/tmp/ws", prompt_dir="/tmp/prompts", node=node,
+                always_grant_web_search=False,
+            )
+        self.assertEqual(adapter.tool_allowlist, ("read",))
+
 
 class WriterAdapterContextLengthTest(unittest.TestCase):
     """PLAN-zeromem.md §5.2c: node.budget.tokens becomes the episode's

@@ -105,8 +105,9 @@ from .orchestrator import (
     decide_next_action_with_policy,
 )
 from ..roles.protocol import RoleProvider
-from .reviewer import ReviewVerdict, review_node
+from .reviewer import ReviewVerdict, compute_verdict_digest, review_node
 from .run_dir import (
+    audit_path,
     ensure_audit_path,
     ensure_orchestrator_dir,
     events_path,
@@ -207,6 +208,7 @@ async def review_and_transition_node(
     on_node_passed: NodePassedHook | None = None,
     tree_lock: asyncio.Lock | None = None,
     provider_semaphore: asyncio.Semaphore | None = None,
+    review_sample_rate: float = 0.0,
 ) -> None:
     """One Reviewer verdict + status transition for a single node —
     ``run_round_loop``'s original ``review`` closure, pulled out for the
@@ -220,12 +222,68 @@ async def review_and_transition_node(
     async or an adapter moves calls onto threads.``"""
     run_dir = Path(run_dir)
     artifact_text = _read_artifact(run_dir, node.id)
-    if provider_semaphore is not None:
+    verdict_digest = compute_verdict_digest(artifact_text, node.rubric, node.judgment)
+    cached_verdict: ReviewVerdict | None = None
+    audit_file = audit_path(run_dir, node.id)
+    if audit_file.exists():
+        try:
+            loaded = json.loads(audit_file.read_text(encoding="utf-8"))
+            if (
+                isinstance(loaded, dict)
+                and loaded.get("verdict_digest") == verdict_digest
+                and loaded.get("verdict") == "pass"
+            ):
+                cached_verdict = ReviewVerdict(
+                    node_id=node.id,
+                    items=list(loaded.get("items", [])),
+                    verdict="pass",
+                    truncated=bool(loaded.get("truncated", False)),
+                )
+                log.append(
+                    {
+                        "node_id": node.id,
+                        "role": "reviewer",
+                        "round": 0,
+                        "type": "node_review_cached",
+                        "detail": f"verdict_digest {verdict_digest[:12]} matched cached pass",
+                    }
+                )
+        except Exception:
+            cached_verdict = None
+
+    if cached_verdict is not None:
+        verdict = cached_verdict
+    elif provider_semaphore is not None:
         async with provider_semaphore:
             verdict = review_node(node, artifact_text, provider)
     else:
         verdict = review_node(node, artifact_text, provider)
-    _write_audit(run_dir, node, verdict)
+
+    sampled_disagreement = False
+    if verdict.verdict == "pass" and review_sample_rate > 0.0 and node.judgment:
+        import random
+        if random.random() < review_sample_rate:
+            sampled = review_node(node, artifact_text, provider, temperature=0.7)
+            if sampled.verdict != "pass":
+                sampled_disagreement = True
+                log.append({
+                    "node_id": node.id,
+                    "role": "reviewer",
+                    "round": 0,
+                    "type": "reviewer_sampled_disagreement",
+                    "sampled_verdict": sampled.verdict,
+                    "sampled_items": sampled.items,
+                })
+
+    _write_audit(run_dir, node, verdict, artifact_text=artifact_text)
+    if sampled_disagreement:
+        try:
+            audit_data = json.loads(audit_file.read_text(encoding="utf-8"))
+            audit_data["sampled_disagreement"] = True
+            audit_file.write_text(json.dumps(audit_data, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
     await _transition_after_review(
         node, tree, tree_path, verdict, max_attempts, log, tree_lock=tree_lock
     )
@@ -254,6 +312,8 @@ async def run_round_loop(
     max_parallel: int = 1,
     provider_concurrency: int | None = None,
     should_halt: Callable[[], bool] | None = None,
+    reviewer_provider: RoleProvider | None = None,
+    review_sample_rate: float = 0.0,
 ) -> TaskTree:
     """Drive the Orchestrator/Writer/Reviewer round loop for ``tree.json``.
 
@@ -332,18 +392,21 @@ async def run_round_loop(
             tree_lock=tree_lock,
         )
 
+    rev_provider = reviewer_provider if reviewer_provider is not None else provider
+
     async def review(node: TaskNode) -> None:
         await review_and_transition_node(
             run_dir,
             node,
             tree,
             tree_path,
-            provider=provider,
+            provider=rev_provider,
             max_attempts=max_attempts,
             log=log,
             on_node_passed=on_node_passed,
             tree_lock=tree_lock,
             provider_semaphore=provider_sem,
+            review_sample_rate=review_sample_rate,
         )
 
     # §C2: "gather the resume scan" — nodes caught mid-flight by a crash
@@ -376,6 +439,7 @@ async def run_round_loop(
             provider,
             round_index=round_index,
             policy=dispatch_policy,
+            max_parallel=max_parallel,
         )
         _write_round_trace(run_dir, round_index, tree, decision)
 
@@ -455,7 +519,7 @@ async def run_round_loop(
                     if node.attempts > 0:
                         await asyncio.sleep(min(2 ** (node.attempts - 1), 5))
                     node.status = "dispatched"
-                    tree.save(tree_path)
+                    await _save_tree_locked(tree, tree_path, tree_lock)
                     await dispatch(node)
                     if node.status == "awaiting_review":
                         await review(node)
@@ -567,7 +631,12 @@ def _defect_from_verdict(verdict: ReviewVerdict) -> str:
     return "\n".join(lines) if lines else "reviewer verdict: fail"
 
 
-def _write_audit(run_dir: Path, node: TaskNode, verdict: ReviewVerdict) -> None:
+def _write_audit(
+    run_dir: Path,
+    node: TaskNode,
+    verdict: ReviewVerdict,
+    artifact_text: str = "",
+) -> None:
     path = ensure_audit_path(run_dir, node.id)
     gates: dict | None = None
     if path.exists():
@@ -590,6 +659,7 @@ def _write_audit(run_dir: Path, node: TaskNode, verdict: ReviewVerdict) -> None:
             "items": verdict.items,
             "verdict": verdict.verdict,
             "truncated": verdict.truncated,
+            "verdict_digest": compute_verdict_digest(artifact_text, node.rubric, node.judgment),
         }
     )
     path.write_text(json.dumps(existing, indent=2, sort_keys=True) + "\n", encoding="utf-8")

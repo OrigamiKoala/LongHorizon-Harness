@@ -301,5 +301,36 @@ class UnitInputPathTest(unittest.TestCase):
             self.assertEqual(unit_input_path(run_dir, unit), "unit-01")
 
 
+class UnrecognizedSurveyModeTest(unittest.TestCase):
+    def test_unrecognized_survey_mode_falls_back_to_structural_and_logs(self) -> None:
+        # §D21: unknown survey_mode (e.g. "embedding") uses structural survey (0 calls) and logs
+        import asyncio
+        from kusudaemon.pipeline.driver import RecursiveDriver, RunOptions
+        from kusudaemon.pipeline.run_dir import source_path
+        from kusudaemon.v0.events import EventLog
+
+        async def scenario():
+            with tempfile.TemporaryDirectory() as root_str:
+                run_dir = Path(root_str) / "run"
+                create_run_dir(run_dir.parent, run_dir.name)
+                source_path(run_dir).write_text("# Chapter 1\nSome text\n\n# Chapter 2\nMore text\n", encoding="utf-8")
+                
+                provider = FakeProvider([])  # raises if called
+                driver = RecursiveDriver(
+                    run_dir,
+                    provider=provider,
+                    options=RunOptions(survey_mode="embedding"),
+                )
+                await driver._phase_survey()
+                self.assertEqual(len(provider.calls), 0)
+                
+                events = EventLog(run_dir / "events.jsonl").read_all()
+                unrec = [e for e in events if e.get("type") == "survey_mode_unrecognized"]
+                self.assertEqual(len(unrec), 1)
+                self.assertIn("embedding", unrec[0].get("detail", ""))
+
+        asyncio.run(scenario())
+
+
 if __name__ == "__main__":
     unittest.main()

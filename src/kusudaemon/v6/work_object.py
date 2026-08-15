@@ -33,12 +33,10 @@ import fnmatch
 import os
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Iterator, Literal
+from typing import Iterator, Literal
 
 from ..v1.gates import estimate_tokens
-
-if TYPE_CHECKING:
-    from ..v2.survey import SpineUnit
+from ..v2.survey import SpineUnit
 
 # §A3: "anything over a size ceiling" is excluded from measurement before
 # counting -- a single huge generated/vendored file must not dominate

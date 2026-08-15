@@ -563,6 +563,10 @@ class RunState:
         # ``{tier, measured_tier, override, ...}``; the escalation history
         # is derived from events.jsonl's ``run_tier_escalated`` rows.
         tier_record, escalation_history = self._tier_and_escalation(run_dir, events)
+        from ..v0.cost import CostLedger
+        from ..v0.run_dir import cost_path
+        cost_ledger = CostLedger(cost_path(run_dir))
+        cost_totals = cost_ledger.totals()
         return {
             "attached": True,
             "run_id": self.attached_run_id,
@@ -602,6 +606,9 @@ class RunState:
             "default_model_by_backend": default_model_by_backend,
             "model_override": self.get_model_override(),
             "backend_override": self.get_backend_override(),
+            "cost_usd": cost_totals["cost_usd"],
+            "total_tokens": cost_totals["total_tokens"],
+            "cost_totals": cost_totals,
             "server_time": _now(),
         }
 
@@ -1994,24 +2001,31 @@ def _tree_summary(run_dir: Path, tree: TaskTree, *, cached_read: Callable[[Path,
     when provided (the snapshot hot path), else live from disk — same
     "gates evaluated once, at dispatch" rule as ``node_detail``."""
     read = cached_read or (lambda path, loader: loader())
+    from ..v0.cost import CostLedger
+    from ..v0.run_dir import cost_path
+    cost_file = cost_path(run_dir)
+    cost_records = read(cost_file, lambda p=cost_file: CostLedger(p).read_all())
+    node_costs: dict[str, float] = {}
+    node_tokens: dict[str, int] = {}
+    if isinstance(cost_records, list):
+        for r in cost_records:
+            nid = r.get("node", "-")
+            if nid and nid != "-":
+                node_costs[nid] = node_costs.get(nid, 0.0) + float(r.get("cost_usd", 0.0) or 0.0)
+                node_tokens[nid] = (
+                    node_tokens.get(nid, 0)
+                    + int(r.get("prompt_tokens", 0) or 0)
+                    + int(r.get("completion_tokens", 0) or 0)
+                    + int(r.get("reasoning_tokens", 0) or 0)
+                )
+
     rows: list[dict[str, Any]] = []
     for node in tree.nodes.values():
         audit_file = run_dir / "audit" / f"{node.id}.json"
         gate_results = read(audit_file, lambda p=audit_file: _read_gate_cache_any(p))
         artifact_file = node_artifact_path(run_dir, node.id)
-        # §PERF: both artifact_tokens and artifact_count used to each read
-        # this same file from disk independently, and artifact_count's read
-        # (via the old `_artifact_count` -> `_has_content` -> `_read_text`)
-        # bypassed `cached_read` entirely -- a full, uncached re-read of
-        # every node's artifact on every single snapshot() call (every SSE
-        # tick, ~every 1.5s). One cached read now backs both fields.
         artifact_text = read(artifact_file, lambda p=artifact_file: _read_text(p) or "")
         artifact_tokens = estimate_tokens(artifact_text)
-        # §PERF: the versions directory listing (`_list_versions`, an
-        # `iterdir()` + sort) was likewise uncached and done fresh per node
-        # per snapshot. Cached the same way, keyed on the directory's own
-        # (size, mtime_ns) stamp -- which changes when a version file is
-        # added, same invalidation contract `cached_read` already documents.
         versions_directory = versions_dir(run_dir, node.id)
         version_names = read(versions_directory, lambda p=run_dir, nid=node.id: _list_versions(p, nid))
         artifact_count = (1 if artifact_text.strip() else 0) + len(version_names)
@@ -2030,10 +2044,11 @@ def _tree_summary(run_dir: Path, tree: TaskTree, *, cached_read: Callable[[Path,
                 "artifact_count": artifact_count,
                 "artifact_tokens": artifact_tokens,
                 "parent": node.parent,
+                "cost_usd": round(node_costs.get(node.id, 0.0), 4),
+                "tokens": node_tokens.get(node.id, 0),
             }
         )
     return rows
-    return count
 
 
 def _count_statuses(tree: TaskTree) -> dict[str, int]:

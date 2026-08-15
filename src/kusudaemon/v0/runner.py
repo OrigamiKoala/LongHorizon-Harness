@@ -232,6 +232,24 @@ async def run_node(
             "duration_ms": result.duration_ms,
         }
     )
+    try:
+        from .cost import CostLedger
+        from .run_dir import cost_path
+        cost_ledger = CostLedger(cost_path(run_dir))
+        prompt_tokens = int(result.metadata.get("prompt_tokens", 0) or 0)
+        completion_tokens = int(result.metadata.get("completion_tokens", 0) or 0)
+        cost_usd = result.metadata.get("cost_usd")
+        cost_ledger.record(
+            role="writer",
+            phase="execute",
+            node=node_id,
+            model=str(getattr(adapter, "model", "") or result.metadata.get("model", "")),
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            cost_usd=float(cost_usd) if cost_usd is not None else None,
+        )
+    except Exception:
+        pass
     return result
 
 

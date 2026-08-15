@@ -33,6 +33,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 import random
 import time
 import urllib.error
@@ -87,7 +88,7 @@ from ..v2.pilot import (
     select_pilot_nodes,
     snapshot_pilot_original,
 )
-from ..v2.planner import build_tree
+from ..v2.planner import DEFAULT_DEPTH_CAP, build_tree
 from ..v2.retrieval import build_chunk_index
 from ..v2.run_dir import contract_path
 from ..v6.templates import merge_template_into_tree, write_tree_glossary
@@ -242,6 +243,15 @@ class RunOptions:
     # auto-targeting the same way --tier overrides the classifier.
     auto_probe_plan: bool = True
     workspace_root: str | None = None
+    code_tile_planner: bool = False
+    trust_estimated_calls: bool = True
+    max_parallel_probes: int = 1
+    always_grant_web_search: bool = True
+    max_cost_usd: float | None = None
+    max_total_tokens: int | None = None
+    episode_cache: bool = False
+    review_sample_rate: float = 0.0
+    capabilities: Any = None
 
     def __post_init__(self) -> None:
         if isinstance(self.research_plan, str):
@@ -277,6 +287,15 @@ class RunOptions:
             "tier_override": self.tier_override,
             "no_intake": self.no_intake,
             "auto_probe_plan": self.auto_probe_plan,
+            "code_tile_planner": self.code_tile_planner,
+            "trust_estimated_calls": self.trust_estimated_calls,
+            "max_parallel_probes": self.max_parallel_probes,
+            "always_grant_web_search": self.always_grant_web_search,
+            "max_cost_usd": self.max_cost_usd,
+            "max_total_tokens": self.max_total_tokens,
+            "episode_cache": self.episode_cache,
+            "review_sample_rate": self.review_sample_rate,
+            "capabilities": self.capabilities,
         }
         if ws_root:
             spec["workspace_root"] = ws_root
@@ -322,6 +341,15 @@ class RunOptions:
             tier_override=data.get("tier_override"),
             no_intake=bool(data.get("no_intake", False)),
             auto_probe_plan=bool(data.get("auto_probe_plan", True)),
+            code_tile_planner=bool(data.get("code_tile_planner", False)),
+            trust_estimated_calls=bool(data.get("trust_estimated_calls", True)),
+            max_parallel_probes=int(data.get("max_parallel_probes", 1)),
+            always_grant_web_search=bool(data.get("always_grant_web_search", True)),
+            max_cost_usd=float(data["max_cost_usd"]) if data.get("max_cost_usd") is not None else None,
+            max_total_tokens=int(data["max_total_tokens"]) if data.get("max_total_tokens") is not None else None,
+            episode_cache=bool(data.get("episode_cache", False)),
+            review_sample_rate=float(data.get("review_sample_rate", 0.0)),
+            capabilities=data.get("capabilities"),
         )
 
 
@@ -443,7 +471,12 @@ class RecursiveDriver:
         create_run_dir(self.run_dir.parent, self.run_dir.name)
         self._write_source_and_spec()
         self.log = EventLog(events_path(self.run_dir))
+        from ..v0.cost import CostLedger
+        from ..v0.run_dir import cost_path
+        self.cost_ledger = CostLedger(cost_path(self.run_dir))
         if self.provider is not None:
+            if hasattr(self.provider, "cost_ledger") and getattr(self.provider, "cost_ledger", None) is None:
+                self.provider.cost_ledger = self.cost_ledger
             if hasattr(self.provider, "set_abort_hook"):
                 self.provider.set_abort_hook(self._halted)
             elif getattr(self.provider, "_should_abort", None) is None:
@@ -464,6 +497,8 @@ class RecursiveDriver:
                 self.provider.set_event_hook(_on_fallback)
             elif getattr(self.provider, "_on_model_fallback", None) is None:
                 self.provider._on_model_fallback = _on_fallback
+        from ..v7.capabilities import write_capabilities_toml
+        write_capabilities_toml(self.run_dir, self.options.capabilities, self.options.workspace_root)
         # §D0c: record who is (supposed to be) making progress, so a
         # phase.json frozen on "in_progress" by a dead process can be told
         # apart from one genuinely mid-call.
@@ -546,6 +581,38 @@ class RecursiveDriver:
         construction), so they're tracked per-tier instead of once."""
         return f"{phase}@{tier}" if phase in _TIER_SCOPED_PHASES else phase
 
+    def _check_cost_ceiling(self) -> bool:
+        """PLAN-EFFICIENCY-AND-HORIZON.md §M1: check cumulative tokens and cost
+        against max_cost_usd and max_total_tokens. If exceeded, sets halt.flag
+        and logs run_halted."""
+        if self.options.max_cost_usd is not None or self.options.max_total_tokens is not None:
+            totals = self.cost_ledger.totals()
+            if self.options.max_cost_usd is not None and totals["cost_usd"] > self.options.max_cost_usd:
+                self._log({
+                    "node_id": "-",
+                    "role": "harness",
+                    "round": 0,
+                    "type": "run_halted",
+                    "reason": "cost ceiling",
+                    "current_cost_usd": totals["cost_usd"],
+                    "max_cost_usd": self.options.max_cost_usd,
+                })
+                halt_path(self.run_dir).write_text("cost ceiling", encoding="utf-8")
+                return True
+            if self.options.max_total_tokens is not None and totals["total_tokens"] > self.options.max_total_tokens:
+                self._log({
+                    "node_id": "-",
+                    "role": "harness",
+                    "round": 0,
+                    "type": "run_halted",
+                    "reason": "token ceiling",
+                    "current_tokens": totals["total_tokens"],
+                    "max_total_tokens": self.options.max_total_tokens,
+                })
+                halt_path(self.run_dir).write_text("token ceiling", encoding="utf-8")
+                return True
+        return False
+
     async def _run_phase(self, phase: str, *, round_index: int) -> RunReport:
         if self._phase_done(phase):
             return RunReport(status="done", phase=phase)
@@ -555,6 +622,9 @@ class RecursiveDriver:
         attempt = 0
         while True:
             attempt += 1
+            if self._check_cost_ceiling():
+                self._set_phase(phase, _HALTED, detail=f"halted on cost ceiling in {phase}")
+                return RunReport(status="halted", phase=phase, detail="halted on cost ceiling")
             if self._halted():
                 self._set_phase(phase, _HALTED, detail=f"halted in {phase}")
                 return RunReport(status="halted", phase=phase, detail="halted by operator")
@@ -628,6 +698,8 @@ class RecursiveDriver:
                 "status": status,
             }
         )
+        if self._check_cost_ceiling():
+            return RunReport(status="halted", phase=phase, detail="halted on cost ceiling")
         return RunReport(status=status, phase=phase)
 
     def _reasoning_sink(self, pseudo_node_id: str) -> Callable[[str], None]:
@@ -1044,12 +1116,7 @@ class RecursiveDriver:
                 chunks = prefold_chunks(chunks, target_max_chunks=100)
 
                 mode = self.options.survey_mode
-                if mode == "auto":
-                    mode = "structural"
-
-                if mode in ("deterministic", "structural"):
-                    votes = survey_chunks_structural(chunks)
-                else:
+                if mode == "model":
                     # Model survey path
                     on_reasoning = (
                         (lambda text: self._append_explorer_reasoning(subagent_id, text))
@@ -1069,6 +1136,19 @@ class RecursiveDriver:
                         on_progress=on_progress,
                         streaming=True,
                     )
+                else:
+                    if mode not in ("auto", "deterministic", "structural"):
+                        self._log(
+                            {
+                                "node_id": "-",
+                                "role": "harness",
+                                "round": 0,
+                                "type": "survey_mode_unrecognized",
+                                "phase": "survey",
+                                "detail": f"{mode!r} is not a survey mode; using structural (0 calls)",
+                            }
+                        )
+                    votes = survey_chunks_structural(chunks)
             finally:
                 if subagent_id:
                     # "episode_completed", not the made-up "session_ended" this
@@ -1197,16 +1277,34 @@ class RecursiveDriver:
         work = self._effective_work_object()
         probe_kind = "workspace" if work.kind == "workspace" else "corpus"
         budget = EpisodeBudget()
-        for unit in selected:
-            query = ResearchQuery(
-                slug=unit.id,
-                kind=probe_kind,
-                question=self._structural_probe_question(unit, work),
-            )
-            adapter = self.probe_adapter_factory(query)
-            await run_research_query(
-                self.run_dir, _EXPLORE_PROBE_NODE_ID, query, adapter, self.env, budget
-            )
+        max_parallel_probes = max(1, getattr(self.options, "max_parallel_probes", 1))
+        if max_parallel_probes <= 1:
+            for unit in selected:
+                query = ResearchQuery(
+                    slug=unit.id,
+                    kind=probe_kind,
+                    question=self._structural_probe_question(unit, work),
+                )
+                adapter = self.probe_adapter_factory(query)
+                await run_research_query(
+                    self.run_dir, _EXPLORE_PROBE_NODE_ID, query, adapter, self.env, budget
+                )
+        else:
+            sem = asyncio.Semaphore(max_parallel_probes)
+
+            async def _run_one(unit: SpineUnit) -> None:
+                query = ResearchQuery(
+                    slug=unit.id,
+                    kind=probe_kind,
+                    question=self._structural_probe_question(unit, work),
+                )
+                adapter = self.probe_adapter_factory(query)
+                async with sem:
+                    await run_research_query(
+                        self.run_dir, _EXPLORE_PROBE_NODE_ID, query, adapter, self.env, budget
+                    )
+
+            await asyncio.gather(*(_run_one(unit) for unit in selected))
 
     def _structural_probe_question(self, unit: SpineUnit, work: WorkObject) -> str:
         """The one question every structural-exploration probe answers —
@@ -1238,17 +1336,22 @@ class RecursiveDriver:
         )
 
     async def _phase_plan(self) -> None:
+        tier = self._current_tier()
+        depth_cap = 1 if tier == "T2" else DEFAULT_DEPTH_CAP
         probe_sink: list[dict[str, Any]] = []
         tree = await asyncio.to_thread(
             build_tree,
             load_spine(self.run_dir),
             self.provider,
+            depth_cap=depth_cap,
             input_path_for=lambda unit: unit_input_path(self.run_dir, unit),
             log=self.log,
             unit_summary_for=self._explore_summary_for,
             on_reasoning=self._reasoning_sink("phase-plan"),
             probe_sink=probe_sink,
             streaming=True,
+            code_tile_planner=self.options.code_tile_planner,
+            trust_estimated_calls=self.options.trust_estimated_calls,
         )
         # A5-3: fold the plan call's own probe suggestions (≤2, top-level
         # only) into the research phase — written to disk now so a resume
@@ -1413,6 +1516,7 @@ class RecursiveDriver:
                 self.research_adapter_factory,
                 self.env,
                 EpisodeBudget(),
+                max_parallel=self.options.max_parallel_probes,
             )
         except ValueError as exc:  # only capability refusal is a soft miss
             self._set_phase(phase, "done", detail=f"skipped: {exc}")
@@ -1565,12 +1669,31 @@ class RecursiveDriver:
         # multi-node-capable tree.json — never T1's code-built single-node
         # tree (docstring above).
         enable_split = tier in ("T2", "T3")
+        effective_max_parallel = self.options.max_parallel
+        if effective_max_parallel == 1 and tier in ("T2", "T3"):
+            loaded_tree = self._load_tree()
+            if loaded_tree.nodes and all(not node.depends_on for node in loaded_tree.nodes.values()):
+                derived_parallel = min(4, os.cpu_count() or 1)
+                if derived_parallel > 1:
+                    effective_max_parallel = derived_parallel
+                    self._log(
+                        {
+                            "node_id": "-",
+                            "role": "harness",
+                            "round": 0,
+                            "type": "max_parallel_derived",
+                            "detail": f"dependency-free tree derived max_parallel={effective_max_parallel}",
+                        }
+                    )
+        reviewer_provider = self._role_provider("reviewer")
         await run_round_loop(
             self.run_dir,
             tree_path(self.run_dir),
             writer_adapter_factory=self.writer_adapter_factory,
             env=self.env,
             provider=self.provider,
+            reviewer_provider=reviewer_provider,
+            review_sample_rate=self.options.review_sample_rate,
             prompt_for_node=lambda node: self._prompt_for_node(
                 node, inline_spans=self.options.inline_spans
             ),
@@ -1581,7 +1704,7 @@ class RecursiveDriver:
             max_attempts=max_attempts,
             dispatch_policy=self.options.dispatch_policy,
             # PLAN.md §C2: a config, not a redesign — see RunOptions.
-            max_parallel=self.options.max_parallel,
+            max_parallel=effective_max_parallel,
             split_handler=handle_split_proposal if enable_split else None,
             on_node_passed=maybe_derive_split_parent if enable_split else None,
             # PLAN-AUDIT.md §E15: the exact same halt.flag check
@@ -1651,7 +1774,7 @@ class RecursiveDriver:
             return
         try:
             last = None
-            for ev in self.log.read_all():
+            for ev in self.log.read_tail(200):
                 if ev.get("type") == "node_blocked":
                     last = ev
             if last is not None and last.get("nodes") == blocked:
@@ -2141,6 +2264,89 @@ class RecursiveDriver:
             return contract_path(self.run_dir).exists()
         return False  # execute/verify/review/research/assemble: idempotent, always re-run
 
+    def _model_for_role(self, role: str) -> str | None:
+        from ..provider_config import get_model_for_role
+        return get_model_for_role(
+            role,
+            default_model=self.options.model,
+            run_dir=self.run_dir,
+        )
+
+    def _role_provider(self, role: str) -> RoleProvider:
+        from ..roles.factory import make_role_provider
+        role_model = self._model_for_role(role)
+        if not role_model or role_model == getattr(self.provider, "model", None):
+            return self.provider
+        return make_role_provider(
+            options=self.options,
+            model=role_model,
+            run_dir=self.run_dir,
+            env=self.env,
+        )
+
+    def _generate_resumption_brief(self) -> None:
+        """PLAN-EFFICIENCY-AND-HORIZON.md §M7: Resumption brief for operator.
+        Zero model calls, built purely from durable disk artifacts."""
+        assembly_dir = self.run_dir / "assembly"
+        assembly_dir.mkdir(parents=True, exist_ok=True)
+        resumption_file = assembly_dir / "resumption.md"
+
+        tier = self._current_tier()
+        phase_rec = {}
+        try:
+            phase_rec = json.loads(phase_path(self.run_dir).read_text(encoding="utf-8"))
+        except OSError:
+            pass
+        current_phase = phase_rec.get("phase", "-")
+        phase_status = phase_rec.get("status", "-")
+
+        tree = self._load_tree()
+        counts: dict[str, int] = {}
+        blocked_nodes: list[tuple[str, str]] = []
+        for n in tree.nodes.values():
+            counts[n.status] = counts.get(n.status, 0) + 1
+            if n.status == "blocked":
+                blocked_nodes.append((n.id, n.last_defect or "unknown defect"))
+
+        pending_approvals = approval_store.pending(self.run_dir)
+        totals = self.cost_ledger.totals()
+
+        lines = [
+            f"# Resumption Brief — Run `{self.run_dir.name}`",
+            "",
+            f"- **Tier:** {tier}",
+            f"- **Phase:** {current_phase} ({phase_status})",
+            f"- **Cost:** ${totals['cost_usd']:.4f} ({totals['total_tokens']:,} tokens across {totals['calls']} calls)",
+            f"- **Tree:** {len(tree.nodes)} nodes ({', '.join(f'{k}: {v}' for k, v in sorted(counts.items())) if counts else 'empty'})",
+            f"- **Approvals:** {len(pending_approvals)} pending",
+            "",
+        ]
+        if blocked_nodes:
+            lines.append("## Blocked Nodes")
+            for nid, defect in blocked_nodes:
+                lines.append(f"- **{nid}:** {defect}")
+            lines.append("")
+
+        if pending_approvals:
+            lines.append("## Pending Approvals")
+            for app in pending_approvals[:5]:
+                lines.append(f"- **{app.approval_id}** ({app.kind}): {app.title}")
+            lines.append("")
+
+        lines.append("## Next Action")
+        if pending_approvals:
+            lines.append(f"Resolve pending approval `{pending_approvals[0].approval_id}` with `kusudaemon pipeline approve`.")
+        elif blocked_nodes:
+            lines.append(f"Review and repair blocked node `{blocked_nodes[0][0]}` with `kusudaemon pipeline reopen`.")
+        elif phase_status == "halted":
+            lines.append("Resume execution with `kusudaemon pipeline resume`.")
+        elif phase_status == "done":
+            lines.append("Run complete. Output artifacts available in `assembly/` and `out/`.")
+        else:
+            lines.append(f"Proceed with phase `{current_phase}`.")
+
+        resumption_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
     def _has_run_dir(self) -> bool:
         return self.run_dir.exists() and (self.run_dir / "events.jsonl").exists()
 
@@ -2272,6 +2478,7 @@ class RecursiveDriver:
                 node=node,
                 model=self.options.model,
                 run_dir=self.run_dir,
+                always_grant_web_search=self.options.always_grant_web_search,
             )
 
         return factory

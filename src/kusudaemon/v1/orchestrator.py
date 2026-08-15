@@ -86,6 +86,7 @@ def decide_next_action(
     provider: RoleProvider,
     *,
     round_index: int,
+    max_parallel: int = 1,
 ) -> DispatchDecision:
     ready = tree.ready_nodes()
     if not ready:
@@ -102,6 +103,12 @@ def decide_next_action(
             action="dispatch",
             node_id=ready[0],
             reason="code-decided: single ready node, no model call needed",
+        )
+    if max_parallel >= len(ready):
+        return DispatchDecision(
+            action="dispatch",
+            node_id=ready[0],
+            reason=f"code-decided: wave consumes the entire ready set (max_parallel={max_parallel} >= ready={len(ready)})",
         )
 
     messages = [
@@ -166,6 +173,7 @@ def decide_next_action_with_policy(
     *,
     round_index: int,
     policy: DispatchPolicy = "model",
+    max_parallel: int = 1,
 ) -> DispatchDecision:
     """The single dispatcher both the round loop and tests go through: the
     ``"document_order"`` path spends zero tokens, the ``"model"`` path is
@@ -187,7 +195,9 @@ def decide_next_action_with_policy(
         )
     if provider is None:
         raise ValueError("policy='model' requires a provider")
-    return decide_next_action(tree, manifest_path, provider, round_index=round_index)
+    return decide_next_action(
+        tree, manifest_path, provider, round_index=round_index, max_parallel=max_parallel
+    )
 
 
 def _compact_state(tree: TaskTree, ready: list[str], manifest_path: str, round_index: int) -> str:

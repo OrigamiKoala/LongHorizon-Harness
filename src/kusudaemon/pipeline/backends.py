@@ -126,6 +126,25 @@ def hidden_paths_for_node(
     return _hidden_paths_and_exceptions_for(node, Path(run_dir), Path(workspace_root))
 
 
+def _node_has_web_probe(node: TaskNode | None, run_dir: Path | None) -> bool:
+    if node is None or run_dir is None:
+        return False
+    probe_plan = run_dir / "probe_plan.json"
+    if probe_plan.is_file():
+        try:
+            data = json.loads(probe_plan.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                for p in data.get("probes", []):
+                    if p.get("node_id") == node.id and p.get("kind") == "web":
+                        return True
+        except Exception:
+            pass
+    for inp in node.inputs:
+        if "web" in inp.lower() or "research" in inp.lower():
+            return True
+    return False
+
+
 def build_writer_adapter(
     backend: str,
     *,
@@ -136,12 +155,12 @@ def build_writer_adapter(
     mcp_config: str | None = None,
     run_dir: str | Path | None = None,
     provider: str | None = None,
+    always_grant_web_search: bool = True,
 ) -> AgentAdapter:
     """A Writer adapter for one node. ``node.tools`` narrows the tool set
     (the adapter's ``tool_allowlist``) the same way v1's round loop does —
-    web search is layered on top of that narrowed (or default) set
-    unconditionally, so even a node scoped down via ``node.tools`` keeps
-    search access.
+    web search is granted when always_grant_web_search is True, or when
+    node.tools includes 'web', or when the node has an attached web probe.
 
     ``provider`` names the provider.json provider the gptme writer backend
     should use (the run's own selection from the new-run modal); the
@@ -161,10 +180,17 @@ def build_writer_adapter(
     )
 
     base_tools = tuple(node.tools) if node and node.tools else DEFAULT_TOOL_ALLOWLIST
-    web_search_tools = allowed_tools_for("web_search")
-    all_writer_tools = base_tools + tuple(
-        tool for tool in web_search_tools if tool not in base_tools
+    wants_web = (
+        always_grant_web_search
+        or bool(node is not None and ("web" in node.tools or _node_has_web_probe(node, run_dir_path)))
     )
+    if wants_web:
+        web_search_tools = allowed_tools_for("web_search")
+        all_writer_tools = base_tools + tuple(
+            tool for tool in web_search_tools if tool not in base_tools
+        )
+    else:
+        all_writer_tools = base_tools
 
     hidden: tuple[str, ...] = ()
     exceptions: tuple[str, ...] = ()

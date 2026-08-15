@@ -49,6 +49,7 @@ import os
 import re
 from collections.abc import Generator
 from pathlib import Path
+from typing import Any
 
 WORKSPACE_READ_TOOL_PATH = Path(__file__).resolve()
 
@@ -171,7 +172,7 @@ def execute_workspace_read(
     code: str | None,
     args: list[str] | None,
     kwargs: dict[str, str] | None,
-) -> Generator["Message", None, None]:
+) -> Generator[Any, None, None]:
     from gptme.message import Message  # local import: only needed inside gptme's process
 
     text = (code or "").strip()

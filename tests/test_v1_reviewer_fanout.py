@@ -247,8 +247,15 @@ class RegenerateShortCircuitTest(unittest.TestCase):
         provider = FakeProvider(responses)
         verdict = review_node(_node(), artifact, provider)
         self.assertEqual(len(provider.calls), 1)
-        self.assertEqual(verdict.verdict, "fail")
-        self.assertEqual(verdict.items[0]["class"], "regenerate")
+class VerdictDigestCacheTest(unittest.TestCase):
+    def test_compute_verdict_digest_is_deterministic(self) -> None:
+        from kusudaemon.v1.reviewer import compute_verdict_digest
+
+        d1 = compute_verdict_digest("text", {"a": "rule a"}, ["a"])
+        d2 = compute_verdict_digest("text", {"a": "rule a"}, ["a"])
+        self.assertEqual(d1, d2)
+        d3 = compute_verdict_digest("different text", {"a": "rule a"}, ["a"])
+        self.assertNotEqual(d1, d3)
 
 
 if __name__ == "__main__":

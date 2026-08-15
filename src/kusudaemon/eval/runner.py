@@ -409,3 +409,14 @@ def run_eval_suite_sync(
     """Synchronous entry point (``unittest`` tests and the CLI both use
     it) wrapping the async suite."""
     return asyncio.run(run_eval_suite(tasks=tasks, runs=runs, report_path=report_path))
+
+
+def run_eval(
+    task_id: str | None = None,
+    runs: int = 1,
+    report_path: Path | None = None,
+) -> EvalReport:
+    """PLAN-EFFICIENCY-AND-HORIZON.md §N5: Convenience entrypoint for CLI."""
+    all_tasks = build_tasks()
+    selected = tuple(t for t in all_tasks if t.task_id == task_id) if task_id else all_tasks
+    return run_eval_suite_sync(tasks=selected, runs=runs, report_path=report_path)

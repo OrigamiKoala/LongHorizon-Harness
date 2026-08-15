@@ -396,7 +396,6 @@ def run_document_review(
             if classification == "regenerate":
                 record["classification"] = "regenerate"
 
-    extra: dict[str, Any] = {"contract_text": contract_text, "spine_labels": spine_labels}
     windows = window_indices(len(entries), window=window, stride=stride)
     # A5-4: one call per window covers all three checks (coverage,
     # duplication, contract compliance) — the union context ships once
@@ -404,7 +403,14 @@ def run_document_review(
     # names its originating check; a missing/unknown check is logged
     # under "coverage" (the default reading), never dropped.
     for start, end in windows:
-        context = _merged_render(entries[start:end], extra)
+        window_entries = entries[start:end]
+        window_node_ids = {e.node_id for e in window_entries}
+        lbl_start = max(0, start - 1)
+        lbl_end = min(len(spine_labels), end + 1)
+        window_spine_labels = spine_labels[lbl_start:lbl_end] if spine_labels else []
+        extra: dict[str, Any] = {"contract_text": contract_text, "spine_labels": window_spine_labels}
+
+        context = _merged_render(window_entries, extra)
         payload = provider.complete_json(
             [
                 {"role": "system", "content": _MERGED_SYSTEM_PROMPT},
@@ -421,6 +427,21 @@ def run_document_review(
             check = str(item.get("check") or "")
             if check not in ("coverage", "duplication", "contract_compliance"):
                 check = "coverage"
+            item_node_ids = [str(i) for i in (item.get("node_ids") or [])]
+            if item_node_ids and not any(nid in window_node_ids for nid in item_node_ids):
+                if log is not None:
+                    log.append(
+                        {
+                            "node_id": "-",
+                            "role": "harness",
+                            "round": 0,
+                            "type": "document_review_out_of_scope",
+                            "pass": check,
+                            "node_ids": item_node_ids,
+                            "detail": f"nodes {item_node_ids} outside window [{start}..{end}]",
+                        }
+                    )
+                continue
             absorb(check, item)
         # §11.10.1: an unattributable defect escalated inside absorb —
         # every remaining window and the depth pass would spend ~50 calls

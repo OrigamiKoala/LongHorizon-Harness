@@ -168,3 +168,23 @@ def build_capabilities_prompt(workspace_root: Path | str | None = None) -> str:
             lines.append(f"- **{name}**: `{s.command} {' '.join(s.args)}`".strip())
 
     return "\n".join(lines)
+
+
+def write_capabilities_toml(
+    run_dir: Path,
+    capabilities: Any = None,
+    workspace_root: Path | str | None = None,
+) -> Path:
+    """PLAN-EFFICIENCY-AND-HORIZON.md §M5: Emit gptme-capabilities.toml into run_dir."""
+    mcp_servers = discover_mcp_servers(workspace_root)
+    lines = ["[mcp]", f"enabled = {'true' if mcp_servers else 'false'}", ""]
+    if mcp_servers:
+        lines.append("[mcp.servers]")
+        for name, s in mcp_servers.items():
+            args_json = json.dumps(s.args)
+            env_json = json.dumps(s.env)
+            lines.append(f'{name} = {{ command = "{s.command}", args = {args_json}, env = {env_json} }}')
+    lines.append("")
+    out_path = run_dir / "gptme-capabilities.toml"
+    out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return out_path

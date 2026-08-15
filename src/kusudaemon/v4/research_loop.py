@@ -60,6 +60,9 @@ def attach_finding(node: TaskNode, finding: ResearchFinding) -> bool:
     return True
 
 
+import asyncio
+
+
 async def run_research_loop(
     run_dir: str | Path,
     tree_path: str | Path,
@@ -67,23 +70,48 @@ async def run_research_loop(
     adapter_factory: AdapterFactory,
     env: Environment,
     budget: EpisodeBudget | None = None,
+    *,
+    max_parallel: int = 1,
 ) -> dict[str, list[ResearchFinding]]:
     run_dir = Path(run_dir)
     tree = TaskTree.load(tree_path)
     budget = budget or EpisodeBudget()
     results: dict[str, list[ResearchFinding]] = {}
 
-    for node_id, queries in plan.items():
+    for node_id in plan:
         if node_id not in tree.nodes:
             raise KeyError(f"research plan references unknown node {node_id!r}")
-        node = tree.nodes[node_id]
-        findings: list[ResearchFinding] = []
-        for query in queries:
+
+    if max_parallel <= 1:
+        for node_id, queries in plan.items():
+            node = tree.nodes[node_id]
+            findings: list[ResearchFinding] = []
+            for query in queries:
+                adapter = adapter_factory(node, query)
+                finding = await run_research_query(run_dir, node_id, query, adapter, env, budget)
+                findings.append(finding)
+                attach_finding(node, finding)
+            results[node_id] = findings
+    else:
+        sem = asyncio.Semaphore(max_parallel)
+
+        async def _run_one(node_id: str, query: ResearchQuery) -> tuple[str, ResearchFinding]:
+            node = tree.nodes[node_id]
             adapter = adapter_factory(node, query)
-            finding = await run_research_query(run_dir, node_id, query, adapter, env, budget)
-            findings.append(finding)
+            async with sem:
+                finding = await run_research_query(run_dir, node_id, query, adapter, env, budget)
+            return node_id, finding
+
+        tasks = [
+            _run_one(node_id, query)
+            for node_id, queries in plan.items()
+            for query in queries
+        ]
+        gathered = await asyncio.gather(*tasks)
+        for node_id, finding in gathered:
+            node = tree.nodes[node_id]
+            results.setdefault(node_id, []).append(finding)
             attach_finding(node, finding)
-        results[node_id] = findings
 
     tree.save(tree_path)
     return results

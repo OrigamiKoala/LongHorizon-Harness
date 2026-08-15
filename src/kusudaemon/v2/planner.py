@@ -61,6 +61,11 @@ PARTITION_SCHEMA: dict[str, Any] = {
                     "unit_end": {"type": "integer", "minimum": 0},
                     "estimated_calls": {"type": "integer", "minimum": 1},
                     "shape": {"type": "string", "enum": _SHAPES},
+                    "depends_on": {
+                        "type": "array",
+                        "items": {"type": "string", "maxLength": 40},
+                        "maxItems": 3,
+                    },
                 },
             },
         },
@@ -114,6 +119,11 @@ class Candidate:
     unit_end: int
     estimated_calls: int
     tokens: int
+    depends_on: list[str] | None = None
+
+    def __post_init__(self) -> None:
+        if self.depends_on is None:
+            self.depends_on = []
 
 
 def _render_slice(
@@ -193,6 +203,8 @@ def plan_level(
         unit_start = max(0, min(int(child["unit_start"]), len(units) - 1))
         unit_end = max(unit_start, min(int(child["unit_end"]), len(units) - 1))
         tokens = sum(unit.tokens for unit in units[unit_start : unit_end + 1])
+        raw_deps = child.get("depends_on")
+        deps = [str(d).strip() for d in raw_deps if str(d).strip()] if isinstance(raw_deps, list) else []
         candidates.append(
             Candidate(
                 id=str(child["id"]),
@@ -202,6 +214,7 @@ def plan_level(
                 unit_end=unit_end,
                 estimated_calls=int(child["estimated_calls"]),
                 tokens=tokens,
+                depends_on=deps,
             )
         )
     return candidates
@@ -212,6 +225,7 @@ def leaf_gate(
     *,
     token_budget: int = DEFAULT_TOKEN_BUDGET,
     tool_call_cap: int = DEFAULT_TOOL_CALL_CAP,
+    trust_estimated_calls: bool = True,
 ) -> tuple[bool, list[str]]:
     """§4.3: a node may be a leaf only if *all* hold. Checked by the harness,
     never asserted by the model. ("Produces exactly one named artifact" and
@@ -224,7 +238,7 @@ def leaf_gate(
         reasons.append("no checkable done-condition")
     if candidate.tokens > token_budget:
         reasons.append(f"inputs {candidate.tokens} tokens exceed budget {token_budget}")
-    if candidate.estimated_calls > tool_call_cap:
+    if trust_estimated_calls and candidate.estimated_calls > tool_call_cap:
         reasons.append(f"estimated {candidate.estimated_calls} calls exceed cap {tool_call_cap}")
     return (not reasons, reasons)
 
@@ -303,6 +317,7 @@ def _repair_partition(
                 unit_end=end,
                 estimated_calls=cand.estimated_calls,
                 tokens=cand.tokens,
+                depends_on=cand.depends_on,
             )
         )
         covered_through = end
@@ -320,6 +335,54 @@ def _repair_partition(
     return repaired, "; ".join(detail) or None
 
 
+def _sanitize_dependencies(
+    candidates: list[Candidate],
+    emit: Callable[[dict[str, Any]], None] | None = None,
+) -> None:
+    sibling_ids = {c.id for c in candidates}
+    for c in candidates:
+        valid_deps = []
+        for dep in (c.depends_on or []):
+            if dep in sibling_ids and dep != c.id:
+                valid_deps.append(dep)
+            else:
+                if emit is not None:
+                    emit(
+                        {
+                            "node_id": c.id,
+                            "type": "planner_dep_dropped",
+                            "dep": dep,
+                            "reason": "unknown or self dependency",
+                        }
+                    )
+        c.depends_on = valid_deps
+
+    adj = {c.id: list(c.depends_on) for c in candidates}
+    for c in candidates:
+        visited: set[str] = set()
+        stack: list[str] = list(c.depends_on)
+        has_cycle = False
+        while stack:
+            curr = stack.pop()
+            if curr == c.id:
+                has_cycle = True
+                break
+            if curr not in visited:
+                visited.add(curr)
+                stack.extend(adj.get(curr, []))
+        if has_cycle:
+            c.depends_on = []
+            adj[c.id] = []
+            if emit is not None:
+                emit(
+                    {
+                        "node_id": c.id,
+                        "type": "planner_dep_dropped",
+                        "reason": "cycle detected",
+                    }
+                )
+
+
 def build_tree(
     units: list[SpineUnit],
     provider: RoleProvider,
@@ -335,6 +398,8 @@ def build_tree(
     on_reasoning: Callable[[str], None] | None = None,
     probe_sink: list[dict[str, Any]] | None = None,
     streaming: bool = False,
+    code_tile_planner: bool = False,
+    trust_estimated_calls: bool = True,
 ) -> TaskTree:
     """Recurse level-at-a-time from the full spine to a flat set of leaf
     TaskNodes. Depth cap, node cap, and a size floor (a one-unit slice
@@ -406,7 +471,7 @@ def build_tree(
             shape=candidate.shape,
             inputs=inputs,
             budget=NodeBudget(tokens=token_budget, calls=tool_call_cap),
-            depends_on=[],
+            depends_on=list(candidate.depends_on or []),
         )
         # PLAN.md §C1: apply the shape's node-type template's gates /
         # judgment / rubric to the leaf. Warn-severity gates ship into
@@ -442,6 +507,14 @@ def build_tree(
         if depth >= depth_cap:
             forced_leaf(slice_units, path or f"depth{depth}", "depth cap reached")
             return
+        if code_tile_planner:
+            if all(u.tokens >= token_budget for u in slice_units):
+                for unit in slice_units:
+                    forced_leaf([unit], f"{path}.{unit.id}" if path else unit.id, "unit exceeds budget alone")
+                return
+            if sum(u.tokens for u in slice_units) <= token_budget:
+                forced_leaf(slice_units, path or slice_units[0].id, "slice fits budget")
+                return
 
         candidates = plan_level(
             slice_units,
@@ -472,12 +545,16 @@ def build_tree(
                     "slice_size": len(slice_units),
                 }
             )
+        _sanitize_dependencies(candidates, emit)
 
         for candidate in candidates:
             node_id = f"{path}.{candidate.id}" if path else candidate.id
             child_units = slice_units[candidate.unit_start : candidate.unit_end + 1]
             is_leaf, _reasons = leaf_gate(
-                candidate, token_budget=token_budget, tool_call_cap=tool_call_cap
+                candidate,
+                token_budget=token_budget,
+                tool_call_cap=tool_call_cap,
+                trust_estimated_calls=trust_estimated_calls,
             )
             if is_leaf or depth + 1 >= depth_cap or len(child_units) <= 1:
                 add_leaf(node_id, candidate, child_units)
