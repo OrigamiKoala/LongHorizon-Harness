@@ -620,5 +620,201 @@ class BuildTreeTest(unittest.TestCase):
             self.assertEqual(dropped[0]["dep"], "nonexistent_dep")
 
 
+class DependsOnRewriteTest(unittest.TestCase):
+    """§D28: the planner's recursive levels stored model-space candidate ids
+    in ``depends_on`` verbatim while final node ids are path-prefixed
+    (candidate "opening" under path "c01" becomes node "c01.opening"), and a
+    recursed candidate never becomes a node at all — its children replace it.
+    Both left a dangling edge in ``tree.json``, which the next
+    ``TaskTree.load`` rejected with "depends_on unknown node" (observed live
+    on a 12-chapter textbook run: 'c01.kinetic-motion' -> 'opening' and
+    'c08' -> 'c02', the latter split into children by the recursion). Each
+    test round-trips the built tree through disk so the load validation is
+    part of the assertion."""
+
+    def test_depends_on_rewritten_to_prefixed_final_ids(self) -> None:
+        import tempfile
+        from kusudaemon.v0.events import EventLog
+        from kusudaemon.v1.tree import TaskTree
+
+        units = _units(6, tokens=1000)
+        top_level = {
+            "children": [
+                {
+                    "id": "ch01",
+                    "brief": "write the whole chapter",
+                    "unit_start": 0,
+                    "unit_end": 5,
+                    "estimated_calls": 99,  # forces the recursive call
+                    "shape": "prose-dominant",
+                }
+            ]
+        }
+        second_level = {
+            "children": [
+                {
+                    "id": "opening",
+                    "brief": "write opening",
+                    "unit_start": 0,
+                    "unit_end": 2,
+                    "estimated_calls": 3,
+                    "shape": "prose-dominant",
+                },
+                {
+                    "id": "kinetic-motion",
+                    "brief": "write kinetic motion",
+                    "unit_start": 3,
+                    "unit_end": 5,
+                    "estimated_calls": 3,
+                    "shape": "prose-dominant",
+                    "depends_on": ["opening"],
+                },
+            ]
+        }
+        with tempfile.TemporaryDirectory() as root_str:
+            log = EventLog(root_str + "/events.jsonl")
+            tree = build_tree(units, FakeProvider([top_level, second_level]), log=log)
+            self.assertEqual(
+                tree.nodes["ch01.kinetic-motion"].depends_on, ["ch01.opening"]
+            )
+            tree_path = root_str + "/tree.json"
+            tree.save(tree_path)
+            TaskTree.load(tree_path)
+
+    def test_depends_on_onto_recursed_sibling_repoints_at_descendant_leaves(self) -> None:
+        import tempfile
+        from kusudaemon.v0.events import EventLog
+        from kusudaemon.v1.tree import TaskTree
+
+        units = _units(8, tokens=1000)
+        top_level = {
+            "children": [
+                {
+                    "id": "c02",
+                    "brief": "write chapter 2",
+                    "unit_start": 0,
+                    "unit_end": 3,
+                    "estimated_calls": 99,  # forces recursion
+                    "shape": "prose-dominant",
+                },
+                {
+                    "id": "c08",
+                    "brief": "write chapter 8",
+                    "unit_start": 4,
+                    "unit_end": 7,
+                    "estimated_calls": 3,
+                    "shape": "prose-dominant",
+                    "depends_on": ["c02"],
+                },
+            ]
+        }
+        second_level = {
+            "children": [
+                {
+                    "id": "setup",
+                    "brief": "write setup",
+                    "unit_start": 0,
+                    "unit_end": 1,
+                    "estimated_calls": 3,
+                    "shape": "prose-dominant",
+                },
+                {
+                    "id": "contact",
+                    "brief": "write contact",
+                    "unit_start": 2,
+                    "unit_end": 3,
+                    "estimated_calls": 3,
+                    "shape": "prose-dominant",
+                },
+            ]
+        }
+        with tempfile.TemporaryDirectory() as root_str:
+            log = EventLog(root_str + "/events.jsonl")
+            tree = build_tree(units, FakeProvider([top_level, second_level]), log=log)
+            self.assertEqual(tree.nodes["c08"].depends_on, ["c02.setup", "c02.contact"])
+            tree_path = root_str + "/tree.json"
+            tree.save(tree_path)
+            TaskTree.load(tree_path)
+
+    def test_depends_on_onto_recursed_sibling_works_at_deeper_levels(self) -> None:
+        import tempfile
+        from kusudaemon.v0.events import EventLog
+        from kusudaemon.v1.tree import TaskTree
+
+        units = _units(9, tokens=1000)
+        top_level = {
+            "children": [
+                {
+                    "id": "ch01",
+                    "brief": "write chapter 1",
+                    "unit_start": 0,
+                    "unit_end": 8,
+                    "estimated_calls": 99,
+                    "shape": "prose-dominant",
+                }
+            ]
+        }
+        second_level = {
+            "children": [
+                {
+                    "id": "a",
+                    "brief": "write a",
+                    "unit_start": 0,
+                    "unit_end": 0,
+                    "estimated_calls": 3,
+                    "shape": "prose-dominant",
+                },
+                {
+                    "id": "b",
+                    "brief": "write b",
+                    "unit_start": 1,
+                    "unit_end": 5,
+                    "estimated_calls": 99,  # recurses again
+                    "shape": "prose-dominant",
+                },
+                {
+                    "id": "c",
+                    "brief": "write c",
+                    "unit_start": 6,
+                    "unit_end": 8,
+                    "estimated_calls": 3,
+                    "shape": "prose-dominant",
+                    "depends_on": ["b"],
+                },
+            ]
+        }
+        third_level = {
+            "children": [
+                {
+                    "id": "x",
+                    "brief": "write x",
+                    "unit_start": 0,
+                    "unit_end": 2,
+                    "estimated_calls": 3,
+                    "shape": "prose-dominant",
+                },
+                {
+                    "id": "y",
+                    "brief": "write y",
+                    "unit_start": 3,
+                    "unit_end": 5,
+                    "estimated_calls": 3,
+                    "shape": "prose-dominant",
+                },
+            ]
+        }
+        with tempfile.TemporaryDirectory() as root_str:
+            log = EventLog(root_str + "/events.jsonl")
+            tree = build_tree(
+                units, FakeProvider([top_level, second_level, third_level]), log=log
+            )
+            self.assertEqual(
+                tree.nodes["ch01.c"].depends_on, ["ch01.b.x", "ch01.b.y"]
+            )
+            tree_path = root_str + "/tree.json"
+            tree.save(tree_path)
+            TaskTree.load(tree_path)
+
+
 if __name__ == "__main__":
     unittest.main()

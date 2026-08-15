@@ -440,9 +440,15 @@ def build_tree(
             suffix += 1
         return f"{node_id}-{suffix}"
 
-    def add_leaf(node_id: str, candidate: Candidate, slice_units: list[SpineUnit]) -> None:
+    def add_leaf(
+        node_id: str,
+        candidate: Candidate,
+        slice_units: list[SpineUnit],
+        deps: list[str] | None = None,
+        budgeted: bool = False,
+    ) -> str | None:
         nonlocal cap_event_emitted
-        if not budget.take():
+        if not budgeted and not budget.take():
             if not cap_event_emitted and slice_units:
                 cap_event_emitted = True
                 emit(
@@ -455,7 +461,7 @@ def build_tree(
                         ),
                     }
                 )
-            return
+            return None
         node_id = unique_id(node_id)
         gates = [*default_gates, f"max_tokens:{token_budget}"]
         inputs = (
@@ -471,7 +477,7 @@ def build_tree(
             shape=candidate.shape,
             inputs=inputs,
             budget=NodeBudget(tokens=token_budget, calls=tool_call_cap),
-            depends_on=list(candidate.depends_on or []),
+            depends_on=list(deps if deps is not None else (candidate.depends_on or [])),
         )
         # PLAN.md §C1: apply the shape's node-type template's gates /
         # judgment / rubric to the leaf. Warn-severity gates ship into
@@ -483,8 +489,9 @@ def build_tree(
 
         apply_template_to_node(node)
         nodes[node_id] = node
+        return node_id
 
-    def forced_leaf(slice_units: list[SpineUnit], node_id: str, reason: str) -> None:
+    def forced_leaf(slice_units: list[SpineUnit], node_id: str, reason: str) -> str | None:
         tokens = sum(unit.tokens for unit in slice_units)
         candidate = Candidate(
             id=node_id,
@@ -495,26 +502,34 @@ def build_tree(
             estimated_calls=min(tool_call_cap, max(1, len(slice_units))),
             tokens=tokens,
         )
-        add_leaf(node_id, candidate, slice_units)
+        return add_leaf(node_id, candidate, slice_units)
 
-    def recurse(slice_units: list[SpineUnit], depth: int, path: str) -> None:
+    def recurse(slice_units: list[SpineUnit], depth: int, path: str) -> list[str]:
+        """Build this slice's level and recurse. Returns the ids of every
+        leaf this slice produced, so the caller can re-point ``depends_on``
+        edges that named a recursed candidate at its descendant leaves (a
+        recursed candidate never becomes a node itself — its children
+        replace it)."""
         nonlocal cap_event_emitted
         if not slice_units:
-            return
+            return []
         if len(slice_units) <= 1:
-            forced_leaf(slice_units, path or slice_units[0].id, "single unit, cannot split further")
-            return
+            leaf_id = forced_leaf(slice_units, path or slice_units[0].id, "single unit, cannot split further")
+            return [leaf_id] if leaf_id else []
         if depth >= depth_cap:
-            forced_leaf(slice_units, path or f"depth{depth}", "depth cap reached")
-            return
+            leaf_id = forced_leaf(slice_units, path or f"depth{depth}", "depth cap reached")
+            return [leaf_id] if leaf_id else []
         if code_tile_planner:
             if all(u.tokens >= token_budget for u in slice_units):
+                leaves = []
                 for unit in slice_units:
-                    forced_leaf([unit], f"{path}.{unit.id}" if path else unit.id, "unit exceeds budget alone")
-                return
+                    leaf_id = forced_leaf([unit], f"{path}.{unit.id}" if path else unit.id, "unit exceeds budget alone")
+                    if leaf_id:
+                        leaves.append(leaf_id)
+                return leaves
             if sum(u.tokens for u in slice_units) <= token_budget:
-                forced_leaf(slice_units, path or slice_units[0].id, "slice fits budget")
-                return
+                leaf_id = forced_leaf(slice_units, path or slice_units[0].id, "slice fits budget")
+                return [leaf_id] if leaf_id else []
 
         candidates = plan_level(
             slice_units,
@@ -531,8 +546,8 @@ def build_tree(
             probe_sink=probe_sink if depth == 0 else None,
         )
         if not candidates:
-            forced_leaf(slice_units, path or f"depth{depth}", "planner returned no children")
-            return
+            leaf_id = forced_leaf(slice_units, path or f"depth{depth}", "planner returned no children")
+            return [leaf_id] if leaf_id else []
         candidates, partition_detail = _repair_partition(
             candidates, slice_units, tool_call_cap=tool_call_cap
         )
@@ -547,6 +562,59 @@ def build_tree(
             )
         _sanitize_dependencies(candidates, emit)
 
+        # §D28: model-emitted depends_on names *candidate* ids at this
+        # level; the final node ids are path-prefixed leaves (candidate
+        # "opening" under path "c01" becomes node "c01.opening"), and a
+        # recursed candidate never becomes a node at all. An unwritten edge
+        # dangles — the next TaskTree.load fails with "depends_on unknown
+        # node" (observed live on a 12-chapter textbook plan: 'c08' ->
+        # 'c02' where c02 was recursed into children). So classify every
+        # candidate first, recursing the non-leaves to collect their
+        # descendant leaf ids, then add the leaves with their edges
+        # rewritten: a dep on a leaf sibling re-points at the sibling's
+        # final id; a dep on a recursed sibling re-points at every
+        # descendant leaf (conservative — preserves the ordering the model
+        # asked for without guessing which child holds the content).
+        leaf_final: dict[str, str] = {}
+        recursed_leaves: dict[str, list[str]] = {}
+        pending_leaves: list[tuple[Candidate, list[SpineUnit]]] = []
+
+        def rewritten_deps(candidate: Candidate) -> list[str]:
+            deps: list[str] = []
+            for dep in candidate.depends_on or []:
+                if dep in leaf_final:
+                    deps.append(leaf_final[dep])
+                    emit(
+                        {
+                            "node_id": candidate.id,
+                            "type": "planner_dep_rewritten",
+                            "dep": dep,
+                            "to": leaf_final[dep],
+                            "reason": "leaf id prefixed",
+                        }
+                    )
+                elif dep in recursed_leaves:
+                    deps.extend(recursed_leaves[dep])
+                    emit(
+                        {
+                            "node_id": candidate.id,
+                            "type": "planner_dep_rewritten",
+                            "dep": dep,
+                            "to": recursed_leaves[dep],
+                            "reason": "target recursed into leaves",
+                        }
+                    )
+                else:
+                    emit(
+                        {
+                            "node_id": candidate.id,
+                            "type": "planner_dep_dropped",
+                            "dep": dep,
+                            "reason": "unknown node after rewrite",
+                        }
+                    )
+            return deps
+
         for candidate in candidates:
             node_id = f"{path}.{candidate.id}" if path else candidate.id
             child_units = slice_units[candidate.unit_start : candidate.unit_end + 1]
@@ -557,9 +625,23 @@ def build_tree(
                 trust_estimated_calls=trust_estimated_calls,
             )
             if is_leaf or depth + 1 >= depth_cap or len(child_units) <= 1:
-                add_leaf(node_id, candidate, child_units)
+                if budget.take():
+                    leaf_final[candidate.id] = unique_id(node_id)
+                    pending_leaves.append((candidate, child_units))
+                elif not cap_event_emitted and child_units:
+                    cap_event_emitted = True
+                    emit(
+                        {
+                            "node_id": node_id,
+                            "type": "planner_node_cap_reached",
+                            "detail": (
+                                f"node cap {node_cap} reached; "
+                                f"units {child_units[0].id}..{child_units[-1].id} dropped"
+                            ),
+                        }
+                    )
             else:
-                recurse(child_units, depth + 1, node_id)
+                recursed_leaves[candidate.id] = recurse(child_units, depth + 1, node_id)
             if budget.count >= node_cap:
                 if not cap_event_emitted:
                     cap_event_emitted = True
@@ -575,5 +657,34 @@ def build_tree(
                     )
                 break
 
+        leaf_ids: list[str] = []
+        for candidate, child_units in pending_leaves:
+            final_id = add_leaf(
+                leaf_final[candidate.id],
+                candidate,
+                child_units,
+                deps=rewritten_deps(candidate),
+                budgeted=True,
+            )
+            if final_id is not None:
+                leaf_ids.append(final_id)
+        return leaf_ids
+
     recurse(units, 0, "")
+    # §D28 belt-and-suspenders: no edge may dangle, whatever the model
+    # emitted (duplicate ids, renames the rewrite could not resolve).
+    # TaskTree.load rejects such a tree; drop the edge here instead so the
+    # plan phase can never ship an unloadable tree.json.
+    for node in nodes.values():
+        kept = [dep for dep in node.depends_on if dep in nodes]
+        if len(kept) != len(node.depends_on):
+            emit(
+                {
+                    "node_id": node.id,
+                    "type": "planner_dep_dropped",
+                    "dep": [d for d in node.depends_on if d not in nodes],
+                    "reason": "unknown node after rewrite",
+                }
+            )
+            node.depends_on = kept
     return TaskTree(nodes=nodes)

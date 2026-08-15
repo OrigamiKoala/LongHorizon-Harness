@@ -263,10 +263,13 @@ class TaskTree:
         # and v7/split.py:maybe_derive_split_parent has written it -- a
         # dependent that became ready the instant the parent's status
         # flipped to "split" (before any child ran) could read a stale or
-        # missing artifact. Today this is unreachable in practice: real
-        # depends_on edges pointing at an interior node (§A7) aren't wired
-        # up yet, every planner-built leaf still gets depends_on=[]. Left
-        # as a documented gap rather than silently "fixed" with an
+        # missing artifact. Real planner-built depends_on edges never point
+        # at an interior node, by construction: v2/planner.py rewrites
+        # model-emitted edges onto leaf ids only (§D28 — a recursed
+        # candidate's edge re-points at its descendant leaves, and a
+        # post-build sweep drops anything that would dangle), so an edge
+        # onto a split parent remains unreachable today. Left as a
+        # documented gap rather than silently "fixed" with an
         # unreachable-and-untested code path.
         return all(self.nodes[dep].status == "passed" for dep in node.depends_on)
 
