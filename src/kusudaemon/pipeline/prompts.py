@@ -48,6 +48,7 @@ from ..v2.contract import load_contract
 from ..v2.retrieval import DEFAULT_TOP_K, retrieve_spans
 from ..v2.run_dir import contract_path
 from ..v2.survey import load_spine
+from .corruption import is_artifact_corrupted
 from .run_dir import resolve_stored
 
 _PATCH_RETRY_INSTRUCTION = (
@@ -293,12 +294,13 @@ def segments(
         # A mid-series "rewrite from scratch" burned the remaining attempts
         # on a fresh artifact that had to re-clear the same gates, and the
         # observed retries got *faster* each time, not more thorough.
-        # Regenerate framing applies only to an operator redispatch — a node
-        # that exhausted its series and was reset to a fresh budget
-        # (dashboard/state.py's redispatch job stamps exactly this prefix;
-        # the pre-reset attempt count is not persisted, so the operator's
-        # explicit intervention is the fresh-start judgment call).
-        if node.last_defect.startswith("redispatch requested by operator:"):
+        # Regenerate framing applies only to an operator redispatch where the
+        # artifact is missing, empty, or corrupted (or explicit rewrite requested).
+        # When an existing artifact is healthy/uncorrupted, patch framing is
+        # retained and the prior artifact is inlined to save tokens.
+        is_operator_redispatch = node.last_defect.startswith("redispatch requested by operator")
+        corrupted, _ = is_artifact_corrupted(run_dir, node)
+        if is_operator_redispatch and corrupted:
             add("retry", _REGENERATE_RETRY_INSTRUCTION + node.last_defect)
         else:
             retry_block = _PATCH_RETRY_INSTRUCTION + node.last_defect

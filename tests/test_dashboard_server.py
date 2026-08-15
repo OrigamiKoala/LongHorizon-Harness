@@ -681,6 +681,22 @@ class OperatorActionRoutesTest(_ServerTestCase):
         self.assertEqual(tree.nodes["3"].attempts, 0)
         self.assertIn("redispatch requested by operator", tree.nodes["3"].last_defect)
 
+        # explicit rewrite mode
+        tree.nodes["3"].status = "failed"
+        tree.save(tree_path(self.run_dir))
+        status, payload = self._post("/api/node/3/redispatch", {"reason": "full clean start", "mode": "regenerate"})
+        self.assertEqual(status, 200)
+        tree = TaskTree.load(tree_path(self.run_dir))
+        self.assertIn("redispatch requested by operator [rewrite]", tree.nodes["3"].last_defect)
+
+        # explicit patch mode
+        tree.nodes["3"].status = "failed"
+        tree.save(tree_path(self.run_dir))
+        status, payload = self._post("/api/node/3/redispatch", {"reason": "fix in place", "mode": "patch"})
+        self.assertEqual(status, 200)
+        tree = TaskTree.load(tree_path(self.run_dir))
+        self.assertIn("redispatch requested by operator [patch]", tree.nodes["3"].last_defect)
+
     def test_job_cancel_route(self) -> None:
         from kusudaemon.dashboard.state import _append_job
 

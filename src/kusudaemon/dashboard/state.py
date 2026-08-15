@@ -1333,7 +1333,7 @@ class RunState:
         approval_store.append(run_dir, resolved)
         return True
 
-    def request_redispatch(self, node_id: str, reason: str = "", *, driver: Any = None) -> tuple[dict[str, Any] | None, str]:
+    def request_redispatch(self, node_id: str, reason: str = "", *, mode: str = "auto", driver: Any = None) -> tuple[dict[str, Any] | None, str]:
         """Directly redispatch a single node that never made it —
         failed/blocked/stale. Resets status to pending with attempts=0, updates
         last_defect, and starts/re-hosts the driver if not currently running.
@@ -1354,7 +1354,14 @@ class RunState:
             return None, f"node {node_id!r} is {node.status!r} — not redispatchable (use reopen for passed nodes)"
         node.status = "pending"
         node.attempts = 0
-        node.last_defect = f"redispatch requested by operator: {reason.strip() or '(no reason)'}"
+        mode_normalized = str(mode).lower().strip()
+        if mode_normalized == "regenerate":
+            prefix = "redispatch requested by operator [rewrite]:"
+        elif mode_normalized == "patch":
+            prefix = "redispatch requested by operator [patch]:"
+        else:
+            prefix = "redispatch requested by operator:"
+        node.last_defect = f"{prefix} {reason.strip() or '(no reason)'}"
         tree.save(tpath)
         self._invalidate_file_cache(tpath)
         epath = events_path(run_dir)
@@ -1880,7 +1887,14 @@ def _run_redispatch_job(run_dir: Path, approval_id: str) -> None:
             raise ValueError(f"node {node_id!r} is {node.status!r} — not redispatchable")
         node.status = "pending"
         node.attempts = 0
-        node.last_defect = f"redispatch requested by operator: {context.get('reason') or '(no reason)'}"
+        mode_normalized = str(context.get("mode") or "auto").lower().strip()
+        if mode_normalized == "regenerate":
+            prefix = "redispatch requested by operator [rewrite]:"
+        elif mode_normalized == "patch":
+            prefix = "redispatch requested by operator [patch]:"
+        else:
+            prefix = "redispatch requested by operator:"
+        node.last_defect = f"{prefix} {context.get('reason') or '(no reason)'}"
         tree.save(tree_path(run_dir))
         EventLog(events_path(run_dir)).append(
             {

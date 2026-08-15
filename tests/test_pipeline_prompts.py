@@ -70,13 +70,38 @@ class BuildNodePromptTest(unittest.TestCase):
         self.assertNotIn("Rewrite the artifact from scratch", prompt)
 
     def test_operator_redispatch_uses_regenerate_framing(self) -> None:
-        # §D31: the only case a rewrite is warranted is an operator
-        # redispatch — the node exhausted its series and was reset to a
-        # fresh budget (state.py's redispatch job stamps this prefix). No
-        # prior-artifact inline: a from-scratch rewrite would only be
-        # tempted to patch it.
+        # Operator redispatch when artifact is missing uses regenerate framing
         node = _node(attempts=0, last_defect="redispatch requested by operator: review never passed")
         with tempfile.TemporaryDirectory() as run_dir:
+            prompt = build_node_prompt(node, run_dir)
+        self.assertIn("Rewrite the artifact from scratch", prompt)
+        self.assertNotIn("MINIMAL", prompt)
+        self.assertNotIn("fix it in place", prompt)
+
+    def test_operator_redispatch_with_healthy_artifact_uses_patch_framing(self) -> None:
+        node = _node(attempts=0, last_defect="redispatch requested by operator: missed rubric item 3")
+        with tempfile.TemporaryDirectory() as run_dir:
+            out_dir = Path(run_dir) / "out"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            (out_dir / "a.md").write_text(
+                "# Title\n\nSubstantive draft content that has plenty of words and paragraphs to explain the complete concept clearly without any issues.\n",
+                encoding="utf-8",
+            )
+            prompt = build_node_prompt(node, run_dir)
+        self.assertIn("MINIMAL", prompt)
+        self.assertIn("Substantive draft content", prompt)
+        self.assertIn("fix it in place", prompt)
+        self.assertNotIn("Rewrite the artifact from scratch", prompt)
+
+    def test_operator_redispatch_with_explicit_rewrite_marker_uses_regenerate_framing(self) -> None:
+        node = _node(attempts=0, last_defect="redispatch requested by operator [rewrite]: start from clean slate")
+        with tempfile.TemporaryDirectory() as run_dir:
+            out_dir = Path(run_dir) / "out"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            (out_dir / "a.md").write_text(
+                "# Title\n\nSubstantive draft content that has plenty of words and paragraphs to explain the complete concept clearly without any issues.\n",
+                encoding="utf-8",
+            )
             prompt = build_node_prompt(node, run_dir)
         self.assertIn("Rewrite the artifact from scratch", prompt)
         self.assertNotIn("MINIMAL", prompt)
