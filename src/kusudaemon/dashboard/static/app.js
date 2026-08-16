@@ -880,6 +880,8 @@ const _EVENT_LABEL = {
   run_tier_escalated: "⇡ Tier escalated",
   node_split: "⑂ Node split",
   split_proposal: "⑂ Split proposed",
+  run_completed: "🎉 Run completed",
+  artifact_exported: "📦 Artifact exported",
 };
 
 // Chat outbox card: "📨 queued" (amber) until the flush marks it sent
@@ -1012,6 +1014,28 @@ function renderEventEntry(ev, idx) {
         el("span", null, fmtTime(ev.ts)),
       ]),
       el("div", { class: "error-body" }, ev.detail || ev.error || "background job failed"),
+    ]);
+  }
+  if (ev.type === "run_completed") {
+    const artPath = ev.artifact_path || (state.snapshot && state.snapshot.assembly_path) || null;
+    const expPath = ev.export_path || null;
+    const statement = ev.closing_statement || ev.summary || null;
+    return el("div", { class: "stream-card", "data-key": key, style: "border-left: 3px solid var(--accent-green); background: rgba(16, 185, 129, 0.05);" }, [
+      el("div", { class: "card-title" }, [
+        el("span", { style: "color:var(--accent-green); font-weight:700;" }, "🎉 RUN COMPLETED"),
+        el("span", null, fmtTime(ev.ts)),
+      ]),
+      statement ? el("div", { class: "msg-body", style: "font-size:13px; line-height:1.6; margin:8px 0 10px 0; white-space:pre-wrap; color:var(--text-bright);" }, statement) : null,
+      (artPath || expPath) ? el("div", { class: "card-text", style: "font-size:12px; line-height:1.6; margin-top:6px; border-top: 1px solid rgba(16, 185, 129, 0.2); padding-top:6px;" }, [
+        artPath ? el("div", { style: "margin: 3px 0;" }, [
+          el("span", { class: "dim", style: "margin-right:6px;" }, "Artifact:"),
+          el("code", { class: "code-inline", style: "user-select:all; font-weight:600; color:var(--text-bright);" }, artPath),
+        ]) : null,
+        expPath ? el("div", { style: "margin: 3px 0;" }, [
+          el("span", { class: "dim", style: "margin-right:6px;" }, "Exported:"),
+          el("code", { class: "code-inline", style: "user-select:all; font-weight:600; color:var(--accent-green);" }, expPath),
+        ]) : null,
+      ]) : null,
     ]);
   }
   if (isFailure) {

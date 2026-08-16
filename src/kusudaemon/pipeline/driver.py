@@ -566,10 +566,137 @@ class RecursiveDriver:
             # it after a halt/escalate/error made the event log disagree with
             # the report.
             if report.status == "done":
-                self._log({"node_id": "-", "role": "harness", "round": 0, "type": "run_completed"})
+                artifact_src = self._resolve_final_artifact_path()
+                downloads_dir = Path.home() / "Downloads"
+                export_path = str(downloads_dir / f"{self.run_dir.name}.md") if (artifact_src and downloads_dir.is_dir()) else None
+                closing_statement = self._build_closing_statement(artifact_src, export_path)
+                entry: dict[str, Any] = {
+                    "node_id": "-",
+                    "role": "harness",
+                    "round": 0,
+                    "type": "run_completed",
+                    "closing_statement": closing_statement,
+                    "summary": closing_statement,
+                }
+                if artifact_src is not None:
+                    entry["artifact_path"] = str(artifact_src)
+                if export_path is not None:
+                    entry["export_path"] = export_path
+                self._log(entry)
+
+                try:
+                    traces_dir = self.run_dir / "traces"
+                    traces_dir.mkdir(parents=True, exist_ok=True)
+                    main_trace = traces_dir / "main.jsonl"
+                    with open(main_trace, "a", encoding="utf-8") as f:
+                        f.write(
+                            json.dumps({
+                                "role": "assistant",
+                                "content": closing_statement,
+                                "type": "message",
+                                "ts": time.time(),
+                            })
+                            + "\n"
+                        )
+                except Exception:
+                    pass
+
+                self._export_and_notify_completion(artifact_src=artifact_src, export_path=export_path)
             return report
         finally:
             heartbeat.stop()
+
+    def _resolve_final_artifact_path(self) -> Path | None:
+        """Find the primary assembled artifact or single output file."""
+        assembly_main = self.run_dir / "assembly" / "main.md"
+        if assembly_main.is_file():
+            return assembly_main
+        out_dir = self.run_dir / "out"
+        if out_dir.is_dir():
+            md_files = sorted(out_dir.glob("*.md"))
+            if md_files:
+                return md_files[0]
+        return None
+
+    def _build_closing_statement(
+        self,
+        artifact_src: Path | None,
+        export_path: str | Path | None,
+    ) -> str:
+        """Construct the main agent closing statement summarizing the work done."""
+        lines: list[str] = []
+        tier = self._current_tier()
+        work_obj = self._effective_work_object()
+        lines.append(f"Task completed successfully under tier {tier}.")
+
+        if work_obj.kind == "workspace":
+            nodes = self._load_tree().nodes
+            modified_nodes = [n for n in nodes.values() if n.status == "passed"]
+            if modified_nodes:
+                lines.append("\nModifications & Deliverables:")
+                for n in modified_nodes[:10]:
+                    brief = n.brief or n.id
+                    lines.append(f"- {n.id}: {brief}")
+                if len(modified_nodes) > 10:
+                    lines.append(f"- ... and {len(modified_nodes) - 10} more deliverable(s) passed.")
+        else:
+            nodes = self._load_tree().nodes
+            passed_nodes = [n for n in nodes.values() if n.status == "passed"]
+            count_str = f"{len(passed_nodes)} completed section(s)" if passed_nodes else "all deliverables"
+            lines.append(f"\nGenerated {count_str} according to specification.")
+
+        if artifact_src is not None:
+            lines.append(f"\nPrimary artifact:\n  {artifact_src}")
+        if export_path is not None:
+            lines.append(f"\nExported to:\n  {export_path}")
+
+        return "\n".join(lines)
+
+    def _export_and_notify_completion(
+        self,
+        *,
+        artifact_src: Path | None = None,
+        export_path: str | Path | None = None,
+    ) -> None:
+        """Copy the primary assembled artifact to ~/Downloads and send a system notification."""
+        try:
+            if artifact_src is None:
+                artifact_src = self._resolve_final_artifact_path()
+
+            if export_path is None and artifact_src is not None:
+                downloads_dir = Path.home() / "Downloads"
+                if downloads_dir.is_dir():
+                    export_path = str(downloads_dir / f"{self.run_dir.name}.md")
+
+            if artifact_src is not None and export_path is not None:
+                import shutil
+                target_path = Path(export_path)
+                shutil.copy2(artifact_src, target_path)
+                self._log({
+                    "node_id": "-",
+                    "role": "harness",
+                    "round": 0,
+                    "type": "artifact_exported",
+                    "source": str(artifact_src),
+                    "destination": str(target_path),
+                })
+
+            import subprocess
+            import sys
+            msg = f"Run {self.run_dir.name} completed successfully."
+            if export_path is not None:
+                msg += f" Artifact saved to {Path(export_path).name}."
+            elif artifact_src is not None:
+                msg += " Artifact generated."
+            if sys.platform == "darwin":
+                subprocess.run(
+                    ["osascript", "-e", f'display notification "{msg}" with title "Kusudaemon"'],
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+        except Exception:
+            pass
 
     @staticmethod
     def _ran_key(phase: str, tier: str) -> str:

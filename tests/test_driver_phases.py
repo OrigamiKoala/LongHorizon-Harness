@@ -2298,6 +2298,36 @@ class CostCeilingHaltingTest(unittest.TestCase):
 
         asyncio.run(scenario())
 
+    def test_export_and_notify_completion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_runs, tempfile.TemporaryDirectory() as tmp_home:
+            run_dir = Path(tmp_runs) / "run_test_export"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            assembly_dir = run_dir / "assembly"
+            assembly_dir.mkdir(parents=True, exist_ok=True)
+            (assembly_dir / "main.md").write_text("# Assembled Output\n\nContent", encoding="utf-8")
+            (run_dir / "events.jsonl").touch()
+
+            downloads_dir = Path(tmp_home) / "Downloads"
+            downloads_dir.mkdir(parents=True, exist_ok=True)
+
+            import unittest.mock as mock
+            with mock.patch("pathlib.Path.home", return_value=Path(tmp_home)):
+                driver = RecursiveDriver(
+                    run_dir,
+                    provider=FakeProvider([]),  # type: ignore[arg-type]
+                    options=RunOptions(goal="test"),
+                )
+                driver._export_and_notify_completion()
+
+                exported = downloads_dir / "run_test_export.md"
+                self.assertTrue(exported.exists())
+                self.assertEqual(exported.read_text(encoding="utf-8"), "# Assembled Output\n\nContent")
+
+                events = EventLog(events_path(run_dir)).read_all()
+                export_events = [e for e in events if e.get("type") == "artifact_exported"]
+                self.assertEqual(len(export_events), 1)
+                self.assertEqual(export_events[0]["destination"], str(exported))
+
 
 if __name__ == "__main__":
     unittest.main()

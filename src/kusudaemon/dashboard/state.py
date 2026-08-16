@@ -674,6 +674,7 @@ class RunState:
             "has_spec": _has_content(spec_path(run_dir)),
             "has_contract": contract_path(run_dir).exists(),
             "has_assembly": assembly_output_path(run_dir).exists(),
+            "assembly_path": str(assembly_output_path(run_dir)) if assembly_output_path(run_dir).exists() else None,
             "models": models,
             "default_model": default_model,
             "providers": providers,
