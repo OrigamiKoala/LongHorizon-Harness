@@ -252,6 +252,10 @@ async def review_and_transition_node(
         except Exception:
             cached_verdict = None
 
+    from ..pipeline.bypass import is_node_bypassed
+
+    bypassed = is_node_bypassed(run_dir, node.id, "review") or is_node_bypassed(run_dir, node.id)
+
     if disable_review:
         verdict = ReviewVerdict(node_id=node.id, items=[], verdict="pass")
         log.append(
@@ -263,13 +267,47 @@ async def review_and_transition_node(
                 "detail": "review agents disabled; auto-passing review",
             }
         )
+    elif bypassed:
+        verdict = ReviewVerdict(node_id=node.id, items=[], verdict="pass")
+        log.append(
+            {
+                "node_id": node.id,
+                "role": "reviewer",
+                "round": 0,
+                "type": "node_review_bypassed",
+                "detail": "review bypassed by operator; auto-passing review",
+            }
+        )
     elif cached_verdict is not None:
         verdict = cached_verdict
-    elif provider_semaphore is not None:
-        async with provider_semaphore:
-            verdict = review_node(node, artifact_text, provider)
     else:
-        verdict = review_node(node, artifact_text, provider)
+        async def _do_review() -> ReviewVerdict:
+            if provider_semaphore is not None:
+                async with provider_semaphore:
+                    return await asyncio.to_thread(review_node, node, artifact_text, provider)
+            return await asyncio.to_thread(review_node, node, artifact_text, provider)
+
+        review_task = asyncio.create_task(_do_review())
+        while not review_task.done():
+            if is_node_bypassed(run_dir, node.id, "review") or is_node_bypassed(run_dir, node.id):
+                review_task.cancel()
+                bypassed = True
+                break
+            await asyncio.sleep(0.1)
+
+        if bypassed:
+            verdict = ReviewVerdict(node_id=node.id, items=[], verdict="pass")
+            log.append(
+                {
+                    "node_id": node.id,
+                    "role": "reviewer",
+                    "round": 0,
+                    "type": "node_review_bypassed",
+                    "detail": "review bypassed by operator; auto-passing review",
+                }
+            )
+        else:
+            verdict = await review_task
 
     sampled_disagreement = False
     if not disable_review and verdict.verdict == "pass" and review_sample_rate > 0.0 and node.judgment:

@@ -216,6 +216,24 @@ async def run_research_query(
 
     raw_path = research_raw_finding_path(run_dir, node_id, query.slug)
     r_id = research_node_id(node_id, query.slug)
+
+    from ..pipeline.bypass import is_node_bypassed
+
+    if (
+        is_node_bypassed(run_dir, node_id, "research")
+        or is_node_bypassed(run_dir, node_id)
+        or is_node_bypassed(run_dir, r_id)
+        or is_node_bypassed(run_dir, query.slug)
+    ):
+        return ResearchFinding(
+            node_id=node_id,
+            slug=query.slug,
+            kind=query.kind,
+            text="",
+            finding_path=finding_path,
+            gate_results=evaluate_gates(_GATES, ""),
+        )
+
     result = await run_node(
         run_dir, r_id, research_prompt(query, raw_path), adapter, env, budget
     )

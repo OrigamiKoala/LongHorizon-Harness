@@ -2220,6 +2220,34 @@ input:focus, textarea:focus, select:focus {
 .nav-row:hover .nav-kill-btn { opacity: 1; }
 .nav-kill-btn:hover { color: var(--accent-red) !important; }
 
+.nav-bypass-btn {
+  background: none; border: none; cursor: pointer;
+  color: var(--text-muted); font-size: 11px; line-height: 1;
+  padding: 0 2px; opacity: 0;
+  margin-left: auto;
+  transition: opacity 0.15s ease, color 0.15s ease, transform 0.1s ease;
+}
+.nav-row:hover .nav-bypass-btn { opacity: 0.85; }
+.nav-bypass-btn:hover { color: var(--accent-amber) !important; opacity: 1 !important; transform: scale(1.15); }
+
+.btn-bypass {
+  background: rgba(234, 179, 8, 0.12);
+  border: 1px solid rgba(234, 179, 8, 0.35);
+  color: var(--accent-amber);
+  font-size: 11px;
+  font-weight: 600;
+  border-radius: 4px;
+  padding: 2px 8px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.btn-bypass:hover {
+  background: rgba(234, 179, 8, 0.25);
+  border-color: var(--accent-amber);
+  color: #fff;
+  box-shadow: 0 0 8px rgba(234, 179, 8, 0.3);
+}
+
 .nav-body { display: flex; flex-direction: column; }
 .nav-row {
   display: flex; align-items: center; gap: 6px;

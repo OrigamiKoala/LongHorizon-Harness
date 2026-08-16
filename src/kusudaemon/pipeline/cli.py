@@ -202,6 +202,12 @@ def build_pipeline_parser() -> argparse.ArgumentParser:
     reopen_parser.add_argument("--defect", default="")
     reopen_parser.add_argument("--runs-root", default=_RUNS_ROOT_DEFAULT)
 
+    bypass_parser = sub.add_parser("bypass", help="Cancel or bypass an in-flight process for a node.")
+    bypass_parser.add_argument("run_id")
+    bypass_parser.add_argument("node_id")
+    bypass_parser.add_argument("--process", default="")
+    bypass_parser.add_argument("--runs-root", default=_RUNS_ROOT_DEFAULT)
+
     tier_parser = sub.add_parser("tier", help="Set tier override.")
     tier_parser.add_argument("run_id")
     tier_parser.add_argument("tier", choices=("T0", "T1", "T2", "T3"))
@@ -623,6 +629,17 @@ def cmd_reopen(argv: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_bypass(argv: argparse.Namespace) -> int:
+    run_dir = _require_existing_run(argv.runs_root, argv.run_id)
+    if run_dir is None:
+        return 1
+    from .bypass import set_node_bypass
+
+    set_node_bypass(run_dir, argv.node_id, getattr(argv, "process", "") or "")
+    print(f"bypassed process for node {argv.node_id} in run {argv.run_id}")
+    return 0
+
+
 def cmd_tier(argv: argparse.Namespace) -> int:
     run_dir = _require_existing_run(argv.runs_root, argv.run_id)
     if run_dir is None:
@@ -702,6 +719,8 @@ def dispatch(args: argparse.Namespace) -> int:
         return cmd_kill(args)
     if command == "reopen":
         return cmd_reopen(args)
+    if command == "bypass":
+        return cmd_bypass(args)
     if command == "tier":
         return cmd_tier(args)
     if command == "model":

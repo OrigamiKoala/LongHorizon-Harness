@@ -218,6 +218,7 @@ function recordCli(kind, detail) {
     pilot: () => `kusudaemon approve ${runId} --file out/.versions/${detail}/pilot-original.md`,
     reopen: () => `(dashboard-only — no CLI equivalent yet)`,
     redispatch: () => `(dashboard-only — no CLI equivalent yet)`,
+    bypass: (n) => `kusudaemon pipeline bypass ${runId} ${n || ""}`,
     interject: () => `(dashboard-only — no CLI equivalent yet)`,
     halt: () => `(dashboard-only — no CLI equivalent yet; sets halt.flag)`,
     backend: (b) => `kusudaemon pipeline backend ${runId} ${b || "default"}`,
@@ -1447,6 +1448,17 @@ function renderNav() {
     el("span", { class: "row-id", title: s.id }, ltrunc(s.id, 18)),
     el("span", { class: "row-pip" }, s.live ? "●" : ""),
     s.live && snap.control_enabled ? el("button", {
+      class: "nav-bypass-btn", title: `Bypass/cancel this subagent process and continue the run`,
+      onclick: (e) => {
+        e.stopPropagation();
+        guarded(() => apiPost(`/api/node/${encodeURIComponent(s.id)}/bypass`, {}).then(() => {
+          recordCli("bypass", s.id);
+          showToast(`Process bypassed for ${s.id} — run continuing`);
+          refreshSnapshot();
+        }));
+      },
+    }, "🚫") : null,
+    s.live && snap.control_enabled ? el("button", {
       class: "nav-kill-btn", title: `kill driver (terminates all agents in this run)`,
       onclick: (e) => { e.stopPropagation(); if (confirm(`Kill the driver for this run? This stops all running agents.`)) killRun(snap.run_id); },
     }, "☠") : null,
@@ -1914,6 +1926,16 @@ function buildCommands() {
       if (!nodeArg) { showToast("redispatch needs a node", true); return; }
       await _redispatchAction(nodeArg);
     } },
+    bypass: { key: "bypass", trigger: "bypass", label: "Bypass / cancel process", usage: "> bypass <node>", timeout: 20, run: async (text) => {
+      if (!state.snapshot.attached) { showToast("No run attached", true); return; }
+      const nodeArg = (text || state.selectedNode || "").trim();
+      if (!nodeArg) { showToast("bypass needs a node id", true); return; }
+      await apiPost(`/api/node/${encodeURIComponent(nodeArg)}/bypass`, {});
+      recordCli("bypass", nodeArg);
+      showToast(`Process bypassed for ${nodeArg} — run continuing`);
+      await refreshSnapshot();
+      if (state.selectedNode === nodeArg) loadNodeDetail(nodeArg);
+    } },
     // §2026-08-13: subagent backend override — the header selector's CLI/
     // command-bar twin. Applies at the next dispatch (driver re-reads
     // backend_override.json per dispatch, like the model override).
@@ -2060,6 +2082,7 @@ function renderContextMenu() {
     items.push(el("div", { class: "ctx-item", onclick: () => { state.contextMenu = null; openNode(m.nodeId, "overview"); render(); } }, "node overview"));
     items.push(el("div", { class: "ctx-item", onclick: () => { state.contextMenu = null; openReopen(m.nodeId); render(); } }, "reopen (repair)"));
     items.push(el("div", { class: "ctx-item", onclick: () => { state.contextMenu = null; render(); guarded(() => apiPost(`/api/node/${encodeURIComponent(m.nodeId)}/redispatch`, {}).then(() => { recordCli("redispatch", m.nodeId); showToast("Node redispatched — queued for execution"); }).then(refreshSnapshot)); } }, "redispatch"));
+    items.push(el("div", { class: "ctx-item", onclick: () => { state.contextMenu = null; render(); guarded(() => apiPost(`/api/node/${encodeURIComponent(m.nodeId)}/bypass`, {}).then(() => { recordCli("bypass", m.nodeId); showToast(`Process bypassed for ${m.nodeId} — run continuing`); }).then(refreshSnapshot)); } }, "🚫 bypass process"));
     items.push(el("div", { class: "ctx-item", onclick: () => { state.contextMenu = null; render(); navigator.clipboard && navigator.clipboard.writeText(m.nodeId).then(() => showToast("copied id")); } }, "copy id"));
   }
   return el("div", { class: "overlay ctx-overlay", onclick: () => { state.contextMenu = null; render(); } }, [
@@ -2234,11 +2257,22 @@ function renderGatesTab() {
     it.node_ids && it.node_ids.length ? el("span", { class: "node-link dim", onclick: () => it.node_ids.length === 1 ? openNode(it.node_ids[0], "overview") : null }, `→ ${it.node_ids.join(", ")}`) : null,
     el("span", { class: "dim", style: "margin-left:auto; font-size:11px;" }, it.class || ""),
   ].concat(it.defect ? [el("div", { class: "defect", style: "grid-column:1/-1;" }, it.defect)] : []))) : [el("div", { class: "dim" }, "(no review items)")];
-  // §5.2: a verdict reached over a cut artifact is a weaker verdict — the
-  // truncated flag must be visible here, not only on the Overview tab.
   const truncatedChip = d.truncated ? el("span", { class: "truncated-chip", title: "the artifact was over the reviewer input cap — a section group was truncated for review" }, "⚠ truncated") : null;
+  const bypassReviewBtn = (state.snapshot.control_enabled && d && (d.status === "awaiting_review" || d.status === "dispatched")) ? el("button", {
+    class: "btn-tiny btn-bypass",
+    style: "margin-left:auto;",
+    title: "Bypass review and accept node as passed",
+    onclick: () => {
+      guarded(() => apiPost(`/api/node/${encodeURIComponent(d.id)}/bypass`, { process: "review" }).then(() => {
+        recordCli("bypass", d.id);
+        showToast(`Review bypassed for ${d.id} — node passing`);
+        refreshSnapshot();
+        loadNodeDetail(d.id);
+      }));
+    }
+  }, "🚫 Bypass Review") : null;
   return el("div", { class: "gates-tab" }, [
-    el("div", { class: "sub-hdr" }, ["GATES (machine, cached at dispatch)", truncatedChip]),
+    el("div", { class: "sub-hdr" }, ["GATES (machine, cached at dispatch)", truncatedChip, bypassReviewBtn]),
     ...gateRows,
     el("div", { class: "sub-hdr", style: "margin-top:14px;" }, "REVIEW ITEMS"),
     ...itemRows,
@@ -2307,10 +2341,24 @@ function renderAgentTab() {
     if (d.parent) metaBits.push(`child of ${d.parent}`);
   }
   const metaLine = metaBits.length ? el("span", { class: "dim", style: "font-size:11px; margin-left:8px;" }, metaBits.join(" · ")) : null;
+  const bypassBtn = state.snapshot.control_enabled ? el("button", {
+    class: "btn-tiny btn-bypass",
+    style: "margin-right:8px;",
+    title: "Bypass/cancel active process for this node and continue run",
+    onclick: () => {
+      guarded(() => apiPost(`/api/node/${encodeURIComponent(id)}/bypass`, {}).then(() => {
+        recordCli("bypass", id);
+        showToast(`Process bypassed for ${id} — run continuing`);
+        refreshSnapshot();
+        loadNodeDetail(id);
+      }));
+    },
+  }, "🚫 Bypass") : null;
   const hdr = el("div", { class: "agent-panel-hdr" }, [
     el("span", { class: "agent-id" }, id),
     subBadge, liveBadge, metaLine,
-    el("span", { style: "margin-left:auto;" }, [
+    el("span", { style: "margin-left:auto; display:flex; align-items:center;" }, [
+      bypassBtn,
       el("button", { class: "btn-tiny", title: "go back to task tree", onclick: closeNode }, "✕"),
     ]),
   ]);

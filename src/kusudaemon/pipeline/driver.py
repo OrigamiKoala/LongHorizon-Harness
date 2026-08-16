@@ -1924,6 +1924,8 @@ class RecursiveDriver:
         and ``keep_depth_pass``) matches what's on disk from the last time
         it ran clean.
         """
+        from .bypass import is_node_bypassed
+
         if self.options.disable_review:
             self._log(
                 {
@@ -1932,6 +1934,17 @@ class RecursiveDriver:
                     "round": 0,
                     "type": "document_review_disabled",
                     "detail": "review agents disabled; skipping review phase",
+                }
+            )
+            return None
+        if is_node_bypassed(self.run_dir, "review") or is_node_bypassed(self.run_dir, "document_review"):
+            self._log(
+                {
+                    "node_id": "-",
+                    "role": "reviewer",
+                    "round": 0,
+                    "type": "document_review_bypassed",
+                    "detail": "document review bypassed by operator",
                 }
             )
             return None

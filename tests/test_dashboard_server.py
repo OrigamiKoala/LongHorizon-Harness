@@ -732,6 +732,22 @@ class OperatorActionRoutesTest(_ServerTestCase):
         self.assertIn("hosted_count", snap)
         self.assertEqual(snap["max_concurrent_runs"], DEFAULT_MAX_CONCURRENT_RUNS)
 
+    def test_bypass_node_endpoint(self) -> None:
+        from kusudaemon.pipeline.bypass import is_node_bypassed
+
+        status, payload = self._post("/api/node/1/bypass", {"process": "review"})
+        self.assertEqual(status, 200)
+        self.assertTrue(payload.get("ok"))
+        self.assertTrue(is_node_bypassed(self.run_dir, "1", "review"))
+
+    def test_bypass_slash_command(self) -> None:
+        from kusudaemon.pipeline.bypass import is_node_bypassed
+
+        status, payload = self._post("/api/command", {"command": "/bypass 2"})
+        self.assertEqual(status, 200)
+        self.assertTrue(payload.get("ok"))
+        self.assertTrue(is_node_bypassed(self.run_dir, "2"))
+
 
 class ReadOnlyDashboardServerTest(_ServerTestCase):
     """control_enabled=False must reject every mutating route -- the server

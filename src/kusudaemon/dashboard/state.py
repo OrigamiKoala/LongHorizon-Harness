@@ -850,6 +850,20 @@ class RunState:
         gptme_queue.queue_prompt(logdir, text)
         return True
 
+    def bypass_node(self, node_id: str, process: str = "") -> bool:
+        """Bypass/cancel an in-flight process (review, exploration, writer) for a node.
+        Sets the durable bypass flag and appends an event to events.jsonl."""
+        run_dir = self._attached_dir()
+        if run_dir is None:
+            return False
+        if not node_id:
+            return False
+        from ..pipeline.bypass import set_node_bypass
+
+        set_node_bypass(run_dir, node_id, process)
+        self._invalidate_file_cache(events_path(run_dir))
+        return True
+
     # ------------------------------------------------------------------
     # Hosted runs (hosted state drives the driver in a background thread)
     # ------------------------------------------------------------------

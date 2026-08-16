@@ -91,6 +91,10 @@ def halt_path(run_dir: str | Path) -> Path:
     return Path(run_dir) / "halt.flag"
 
 
+def bypass_dir(run_dir: str | Path) -> Path:
+    return Path(run_dir) / "bypass"
+
+
 def run_spec_path(run_dir: str | Path) -> Path:
     return Path(run_dir) / "run.spec.json"
 

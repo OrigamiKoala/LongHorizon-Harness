@@ -163,23 +163,83 @@ async def run_node(
     # `_last_logdir` re-derives the logdir straight off the trace file
     # itself rather than depending on this event. Skip starting the task
     # entirely rather than starting it and having it find nothing.
+    from ..pipeline.bypass import is_node_bypassed
+
+    if is_node_bypassed(run_dir, node_id, "writer") or is_node_bypassed(run_dir, node_id):
+        log.append(
+            {
+                "node_id": node_id,
+                "role": "writer",
+                "round": 0,
+                "type": "node_execution_bypassed",
+                "detail": "execution bypassed by operator before start",
+            }
+        )
+        artifact_path = node_artifact_path(run_dir, node_id)
+        if not artifact_path.exists():
+            artifact_path.write_text("", encoding="utf-8")
+        log.append(
+            {
+                "node_id": node_id,
+                "role": "writer",
+                "round": 0,
+                "type": "episode_completed",
+                "status": "done",
+                "artifact_path": str(artifact_path),
+                "error": None,
+                "duration_ms": 0,
+            }
+        )
+        return EpisodeResult(status="done", actions_log="bypassed by operator", metadata={"bypassed": True})
+
     stop_watching = asyncio.Event()
     watcher: asyncio.Task[None] | None = None
     if supports_resume:
         watcher = asyncio.create_task(
             _watch_for_session_id(trace_path, log, node_id, stop_watching)
         )
+    episode_kwargs: dict[str, Any] = {"live_trajectory_path": str(trace_path)}
+    if resume_session_id is not None:
+        episode_kwargs["resume_session_id"] = resume_session_id
+
+    episode_task = asyncio.create_task(adapter.run_episode(prompt, env, budget, **episode_kwargs))
+
+    async def _watch_for_bypass() -> None:
+        while not stop_watching.is_set():
+            if is_node_bypassed(run_dir, node_id, "writer") or is_node_bypassed(run_dir, node_id):
+                episode_task.cancel()
+                break
+            await asyncio.sleep(0.1)
+
+    bypass_watcher = asyncio.create_task(_watch_for_bypass())
+    bypassed_mid_flight = False
     try:
-        episode_kwargs: dict[str, Any] = {"live_trajectory_path": str(trace_path)}
-        if resume_session_id is not None:
-            episode_kwargs["resume_session_id"] = resume_session_id
-        result = await adapter.run_episode(prompt, env, budget, **episode_kwargs)
+        result = await episode_task
+    except asyncio.CancelledError:
+        if is_node_bypassed(run_dir, node_id, "writer") or is_node_bypassed(run_dir, node_id):
+            bypassed_mid_flight = True
+            result = EpisodeResult(status="done", actions_log="bypassed by operator", metadata={"bypassed": True})
+            log.append(
+                {
+                    "node_id": node_id,
+                    "role": "writer",
+                    "round": 0,
+                    "type": "node_execution_bypassed",
+                    "detail": "execution bypassed by operator",
+                }
+            )
+        else:
+            raise
     finally:
         stop_watching.set()
         if watcher is not None:
             watcher.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await watcher
+        if bypass_watcher is not None:
+            bypass_watcher.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await bypass_watcher
 
     artifact_path = node_artifact_path(run_dir, node_id)
     # gptme writes the real artifact itself, mid-episode, via its own

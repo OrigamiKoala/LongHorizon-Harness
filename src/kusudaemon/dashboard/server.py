@@ -280,6 +280,16 @@ def _post_redispatch(handler: "DashboardRequestHandler", match: Any, body: dict)
     return (200, approval) if approval else (400, {"error": reason or "not a redispatchable node, or no attached run"})
 
 
+@_route("POST", r"^/api/node/([^/]+)/bypass$")
+def _post_node_bypass(handler: "DashboardRequestHandler", match: Any, body: dict) -> tuple[int, Any]:
+    """Cancel or bypass any running process (review, exploration, writer) for a node."""
+    handler.require_control()
+    node_id = unquote(match.group(1))
+    process = str(body.get("process", ""))
+    ok = handler.state.bypass_node(node_id, process=process)
+    return (200, {"ok": True, "node_id": node_id, "process": process}) if ok else (400, {"ok": False, "error": "failed to bypass node"})
+
+
 @_route("GET", r"^/api/node/([^/]+)/split$")
 def _get_node_split(handler: "DashboardRequestHandler", match: Any, body: dict) -> tuple[int, Any]:
     """§DASHBOARD-UX §11: a v7 split proposal (``scratch/<id>/split.json``)
@@ -506,6 +516,14 @@ def _post_command(handler: "DashboardRequestHandler", match: Any, body: dict) ->
         defect = subparts[1] if len(subparts) > 1 else ""
         ok = handler.state.reopen_node(node_id, defect)
         return (200, {"ok": ok, "message": f"Reopened {node_id}"}) if ok else (400, {"error": f"could not reopen {node_id}"})
+    elif slash_cmd in ("/bypass", "/cancel"):
+        if not arg:
+            return 400, {"error": f"node id required for {slash_cmd}"}
+        subparts = arg.split(maxsplit=1)
+        node_id = subparts[0]
+        process = subparts[1] if len(subparts) > 1 else ""
+        ok = handler.state.bypass_node(node_id, process=process)
+        return (200, {"ok": ok, "message": f"Bypassed process for {node_id}"}) if ok else (400, {"error": f"could not bypass {node_id}"})
     else:
         return 400, {"error": f"unknown command: {slash_cmd}"}
 
