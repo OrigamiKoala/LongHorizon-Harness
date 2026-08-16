@@ -369,7 +369,8 @@ def _get_node_thinking(handler: "DashboardRequestHandler", match: Any, body: dic
     except (TypeError, ValueError):
         since = 0
     since = max(0, since)
-    entries = handler.state.trace_entries(unquote(match.group(1))) or []
+    node_id = unquote(match.group(1))
+    entries = handler.state.trace_entries(node_id) or []
     # B4-5 (IMPLEMENTATION-PLAN-COST-AND-LIVE.md): ts = the entry's index in
     # the trace — a monotonic key the client can sort on. The client used to
     # stamp entries with its own wall clock, so any clock skew or a slow tick
@@ -377,6 +378,9 @@ def _get_node_thinking(handler: "DashboardRequestHandler", match: Any, body: dic
     # events' server timestamps.
     def _serialize_entry(i: int, e: Any) -> dict[str, Any]:
         d: dict[str, Any] = {"role": e.role, "text": e.text, "ts": i}
+        if getattr(e, "node_id", None) is not None:
+            d["node_id"] = e.node_id
+            d["subagent_name"] = e.node_id
         if e.tool_name is not None:
             d["tool_name"] = e.tool_name
         if e.tool_input is not None:

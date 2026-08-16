@@ -348,14 +348,73 @@ class RunState:
         return self._cached_read(cache_key, _models_by_backend_and_defaults, stat_paths=(path,))
 
     def _cached_cost_totals(self, run_dir: Path) -> dict[str, Any]:
-        from ..v0.cost import CostLedger
+        from ..v0.cost import CostLedger, estimate_cost_usd
         from ..v0.run_dir import cost_path
 
         cp = cost_path(run_dir)
+        scratch_dir = run_dir / "scratch"
+        stat_paths: list[Path] = [cp]
+        trace_paths: list[tuple[str, Path]] = []
+        if scratch_dir.is_dir():
+            for p in sorted(scratch_dir.iterdir()):
+                tf = p / "trace.jsonl" if p.is_dir() else (p if p.name == "trace.jsonl" else None)
+                if tf and tf.exists():
+                    trace_paths.append((p.name, tf))
+                    stat_paths.append(tf)
+
+        def _calculate_totals() -> dict[str, Any]:
+            all_recs = CostLedger(cp).read_all() if cp.exists() else []
+            node_counts: dict[str, int] = {}
+            total_prompt = 0
+            total_completion = 0
+            total_reasoning = 0
+            total_cost = 0.0
+
+            for r in all_recs:
+                pt = int(r.get("prompt_tokens", 0) or 0)
+                ct = int(r.get("completion_tokens", 0) or 0)
+                rt = int(r.get("reasoning_tokens", 0) or 0)
+                tt = pt + ct + rt
+                c_usd = float(r.get("cost_usd", 0.0) or 0.0)
+                nid = r.get("node", "-")
+                if nid and nid != "-":
+                    node_counts[nid] = node_counts.get(nid, 0) + tt
+                total_prompt += pt
+                total_completion += ct
+                total_reasoning += rt
+                total_cost += c_usd
+
+            # If any node/phase has 0 recorded tokens in cost.jsonl but has usage in its trace.jsonl,
+            # include the trace's usage so running/live subagents report tokens accurately.
+            for nid, tf in trace_paths:
+                if node_counts.get(nid, 0) == 0:
+                    tu = _scan_trace_usage(tf)
+                    if tu and tu.get("total_tokens", 0) > 0:
+                        pt = tu["prompt_tokens"]
+                        ct = tu["completion_tokens"]
+                        rt = tu["reasoning_tokens"]
+                        c_usd = tu["cost_usd"]
+                        if c_usd == 0.0:
+                            c_usd = estimate_cost_usd("claude-3-5-sonnet", pt, ct)
+                        total_prompt += pt
+                        total_completion += ct
+                        total_reasoning += rt
+                        total_cost += c_usd
+
+            total_tokens = total_prompt + total_completion + total_reasoning
+            return {
+                "prompt_tokens": total_prompt,
+                "completion_tokens": total_completion,
+                "reasoning_tokens": total_reasoning,
+                "total_tokens": total_tokens,
+                "cost_usd": round(total_cost, 6),
+                "records_count": len(all_recs),
+            }
+
         return self._cached_read(
             run_dir / "cost.jsonl#totals",
-            lambda: CostLedger(cp).totals(),
-            stat_paths=(cp,),
+            _calculate_totals,
+            stat_paths=tuple(stat_paths),
         )
 
     # ------------------------------------------------------------------
@@ -2025,6 +2084,59 @@ def _find_approval(run_dir: Path, approval_id: str) -> approval_store.Approval |
     return None
 
 
+def _scan_trace_usage(trace_path: Path) -> dict[str, Any]:
+    """Scan a trace.jsonl file for usage / token events."""
+    if not trace_path.exists():
+        return {}
+    pt = 0
+    ct = 0
+    rt = 0
+    cost = 0.0
+    has_usage = False
+    try:
+        with trace_path.open("r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or not line.startswith("{"):
+                    continue
+                try:
+                    rec = json.loads(line)
+                except Exception:
+                    continue
+                rtype = rec.get("type") or rec.get("role")
+                if rtype == "usage":
+                    has_usage = True
+                    p_tok = int(rec.get("prompt_tokens", 0) or 0)
+                    c_tok = int(rec.get("completion_tokens", 0) or 0)
+                    r_tok = int(rec.get("reasoning_tokens", 0) or 0)
+                    pt += p_tok
+                    ct += c_tok
+                    rt += r_tok
+                    if rec.get("cost_usd") is not None:
+                        try:
+                            cost += float(rec["cost_usd"])
+                        except (ValueError, TypeError):
+                            pass
+                elif rtype == "message" and not has_usage:
+                    p_tok = int(rec.get("prompt_tokens", 0) or 0)
+                    c_tok = int(rec.get("completion_tokens", 0) or 0)
+                    if p_tok or c_tok:
+                        pt += p_tok
+                        ct += c_tok
+    except Exception:
+        pass
+    tot = pt + ct + rt
+    if not has_usage and tot == 0:
+        return {}
+    return {
+        "prompt_tokens": pt,
+        "completion_tokens": ct,
+        "reasoning_tokens": rt,
+        "total_tokens": tot,
+        "cost_usd": cost,
+    }
+
+
 def _load_tree(run_dir: Path) -> TaskTree:
     try:
         return TaskTree.load(run_dir / "tree.json")
@@ -2039,7 +2151,7 @@ def _tree_summary(run_dir: Path, tree: TaskTree, *, cached_read: Callable[[Path,
     when provided (the snapshot hot path), else live from disk — same
     "gates evaluated once, at dispatch" rule as ``node_detail``."""
     read = cached_read or (lambda path, loader: loader())
-    from ..v0.cost import CostLedger
+    from ..v0.cost import CostLedger, estimate_cost_usd
     from ..v0.run_dir import cost_path
     cost_file = cost_path(run_dir)
     cost_records = read(cost_file, lambda p=cost_file: CostLedger(p).read_all())
@@ -2067,6 +2179,17 @@ def _tree_summary(run_dir: Path, tree: TaskTree, *, cached_read: Callable[[Path,
         versions_directory = versions_dir(run_dir, node.id)
         version_names = read(versions_directory, lambda p=run_dir, nid=node.id: _list_versions(p, nid))
         artifact_count = (1 if artifact_text.strip() else 0) + len(version_names)
+        n_tok = node_tokens.get(node.id, 0)
+        n_cost = node_costs.get(node.id, 0.0)
+        if n_tok == 0:
+            tp = node_trace_path(run_dir, node.id)
+            if tp.exists():
+                tu = _scan_trace_usage(tp)
+                if tu and tu.get("total_tokens", 0) > 0:
+                    n_tok = tu["total_tokens"]
+                    n_cost = tu.get("cost_usd", 0.0)
+                    if n_cost == 0.0:
+                        n_cost = estimate_cost_usd("claude-3-5-sonnet", tu["prompt_tokens"], tu["completion_tokens"])
         rows.append(
             {
                 "id": node.id,
@@ -2082,8 +2205,8 @@ def _tree_summary(run_dir: Path, tree: TaskTree, *, cached_read: Callable[[Path,
                 "artifact_count": artifact_count,
                 "artifact_tokens": artifact_tokens,
                 "parent": node.parent,
-                "cost_usd": round(node_costs.get(node.id, 0.0), 4),
-                "tokens": node_tokens.get(node.id, 0),
+                "cost_usd": round(n_cost, 4),
+                "tokens": n_tok,
             }
         )
     return rows

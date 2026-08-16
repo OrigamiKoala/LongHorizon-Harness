@@ -343,7 +343,11 @@ function loadMainThinking() {
           state.mainThinking.sortAnchor = Date.now() / 1000;
         }
         const base = state.mainThinking.sortAnchor;
-        const stamped = fresh.map((entry, i) => Object.assign({}, entry, { sort: base + (entry.ts !== undefined ? entry.ts : i) * 0.001 }));
+        const stamped = fresh.map((entry, i) => Object.assign({}, entry, {
+          node_id: entry.node_id || id,
+          subagent_name: entry.subagent_name || entry.node_id || id,
+          sort: base + (entry.ts !== undefined ? entry.ts : i) * 0.001,
+        }));
         // Cursor re-anchor (2026-08-13): trace entries are NOT append-only —
         // consecutive thinking deltas merge into one entry whose text grows
         // while `total` stays put. The server therefore re-sends the
@@ -387,7 +391,11 @@ function loadThinkingIfNeeded(force = false) {
   apiGet(`/api/node/${encodeURIComponent(id)}/thinking`)
     .then((d) => {
       if (state.selectedNode !== id) return;
-      const entries = d.entries || [];
+      const rawEntries = d.entries || [];
+      const entries = rawEntries.map((e) => Object.assign({}, e, {
+        node_id: e.node_id || id,
+        subagent_name: e.subagent_name || e.node_id || id,
+      }));
       const total = d.total || entries.length;
       const first = entries.length ? entries[0].text : "";
       const last = entries.length ? entries[entries.length - 1].text : "";
@@ -649,6 +657,14 @@ function fmtTokens(n) {
   return num + " tok";
 }
 
+function subagentLabel(e, defaultName = "Agent") {
+  const name = e && (e.subagent_name || e.node_id || e.agent_id);
+  if (name) return String(name);
+  if (state.agentTab === "chat" && state.selectedNode) return String(state.selectedNode);
+  if (state.mainThinking && state.mainThinking.agentId) return String(state.mainThinking.agentId);
+  return defaultName;
+}
+
 const _CHAT_ROLE_LABEL = {
   user: "👤 User",
   assistant: "🤖 Agent",
@@ -662,8 +678,12 @@ const _CHAT_ROLE_LABEL = {
 
 function renderToolChatEntry(e, key) {
   const isCall = e.role === "tool_call";
+  const agentName = subagentLabel(e, "");
   const toolName = e.tool_name || (isCall ? "Tool call" : "Tool result");
   const toolId = e.tool_id ? ` · ${e.tool_id}` : "";
+  const agentBadge = agentName
+    ? el("span", { class: "dim", style: "font-size:10.5px; font-weight:600; color:var(--accent-purple); margin-right:4px;" }, `[${agentName}]`)
+    : null;
   const exitBadge = e.exit_code !== undefined && e.exit_code !== null
     ? el("span", { class: "tool-status-pill " + (e.exit_code === 0 ? "success" : "error") }, e.exit_code === 0 ? "✓ exit 0" : `✕ exit ${e.exit_code}`)
     : null;
@@ -694,6 +714,7 @@ function renderToolChatEntry(e, key) {
     el("details", { class: "tool-details", open: null }, [
       el("summary", { class: "tool-summary" }, [
         el("div", { class: "tool-summary-hdr" }, [
+          agentBadge,
           el("span", { class: "tool-name" }, [isCall ? "🔧 " : "⚡ ", toolName, el("span", { class: "dim", style: "font-size:10px; font-weight:normal;" }, toolId)]),
           exitBadge,
           durBadge,
@@ -723,6 +744,8 @@ function renderToolChatEntry(e, key) {
 }
 
 function renderThinkingChatEntry(e, key) {
+  const agentName = subagentLabel(e, "");
+  const authorLabel = agentName ? `💭 ${agentName} Reasoning` : _CHAT_ROLE_LABEL.thinking;
   const tokenBadge = (e.tokens || e.reasoning_tokens)
     ? el("span", { class: "thinking-token-pill", title: "Reasoning tokens spent on this thought block" }, `🧠 ${fmtTokens(e.tokens || e.reasoning_tokens)}`)
     : null;
@@ -730,7 +753,7 @@ function renderThinkingChatEntry(e, key) {
   return el("div", { class: "stream-msg agent-chat-entry role-thinking thinking-card", ...(key ? { "data-key": key } : {}) }, [
     el("details", { class: "thinking-details", open: !isLong ? "" : null }, [
       el("summary", { class: "thinking-summary" }, [
-        el("span", { class: "author" }, _CHAT_ROLE_LABEL.thinking),
+        el("span", { class: "author" }, authorLabel),
         tokenBadge,
         el("span", { class: "thinking-toggle-cue" }, isLong ? "▸ toggle thought" : ""),
       ]),
@@ -740,9 +763,11 @@ function renderThinkingChatEntry(e, key) {
 }
 
 function renderUsageChatEntry(e, key) {
+  const agentName = subagentLabel(e, "");
+  const authorLabel = agentName ? `📊 ${agentName} Turn Token Usage` : "📊 Turn Token Usage";
   return el("div", { class: "stream-msg agent-chat-entry role-usage usage-card", ...(key ? { "data-key": key } : {}) }, [
     el("div", { class: "msg-hdr" }, [
-      el("span", { class: "author", style: "color:var(--accent-green);" }, "📊 Turn Token Usage"),
+      el("span", { class: "author", style: "color:var(--accent-green);" }, authorLabel),
       el("span", { class: "tool-token-pill" }, `🪙 ${fmtTokens(e.tokens)}`),
       e.cost_usd ? el("span", { class: "dim", style: "font-size:11px;" }, `$${e.cost_usd.toFixed(4)}`) : null,
     ]),
@@ -753,12 +778,13 @@ function renderUsageChatEntry(e, key) {
 }
 
 function renderAssistantChatEntry(e, key) {
+  const agentName = subagentLabel(e, "Agent");
   const tokenBadge = e.tokens
     ? el("span", { class: "tool-token-pill", style: "margin-left:auto;", title: `Tokens: ${e.tokens} (Prompt: ${e.prompt_tokens || 0}, Completion: ${e.completion_tokens || 0})` }, `🪙 ${fmtTokens(e.tokens)}`)
     : null;
   return el("div", { class: "stream-msg agent-chat-entry role-assistant", ...(key ? { "data-key": key } : {}) }, [
     el("div", { class: "msg-hdr" }, [
-      el("span", { class: "author" }, _CHAT_ROLE_LABEL.assistant),
+      el("span", { class: "author" }, `🤖 ${agentName}`),
       tokenBadge,
     ]),
     el("div", { class: "msg-body" }, e.text),
@@ -768,8 +794,10 @@ function renderAssistantChatEntry(e, key) {
 function renderAgentChatEntry(e, idx) {
   const key = `agent-chat-${e.sort !== undefined ? e.sort : (idx !== undefined ? idx : 0)}-${e.role || ""}-${e.ts !== undefined ? e.ts : (idx !== undefined ? idx : 0)}`;
   if (e.role === "diff") {
+    const agentName = subagentLabel(e, "");
+    const diffTitle = agentName ? `📝 ${agentName} File Modification` : _CHAT_ROLE_LABEL.diff;
     return el("div", { class: "stream-card agent-diff-card", "data-key": key }, [
-      el("div", { class: "card-title" }, el("span", null, _CHAT_ROLE_LABEL.diff)),
+      el("div", { class: "card-title" }, el("span", null, diffTitle)),
       el(
         "pre",
         { class: "diff-pre trace-diff-pre" },
@@ -789,7 +817,11 @@ function renderAgentChatEntry(e, idx) {
   if (e.role === "assistant") {
     return renderAssistantChatEntry(e, key);
   }
-  const label = _CHAT_ROLE_LABEL[e.role] || e.role;
+  const agentName = subagentLabel(e, "");
+  let label = _CHAT_ROLE_LABEL[e.role] || e.role;
+  if (agentName && (e.role === "system" || e.role === "raw" || e.role === "logdir" || e.role === "error")) {
+    label = `${label} (${agentName})`;
+  }
   return el("div", { class: `stream-msg agent-chat-entry role-${e.role}`, "data-key": key }, [
     label ? el("div", { class: "msg-hdr" }, el("span", { class: "author" }, label)) : null,
     el("div", { class: "msg-body" }, e.text),
@@ -1223,7 +1255,7 @@ function renderRail() {
   return el("div", { class: "rail" + (stalled ? " stalled" : "") + (snap.halted ? " halted" : "") }, [
     el("div", { class: "rail-left" }, segs.length ? segs : [el("span", { class: "rail-no-phase" }, "—")]),
     el("div", { class: "rail-right" }, [
-      snap.total_tokens ? el("span", { class: "rail-tokens", title: `Total Tokens: ${(snap.total_tokens || 0).toLocaleString()} · Est. Cost: $${(snap.cost_usd || 0).toFixed(4)}` }, `🪙 ${fmtTokens(snap.total_tokens)}`) : null,
+      (snap.total_tokens !== undefined && snap.total_tokens !== null) ? el("span", { class: "rail-tokens", title: `Total Tokens: ${(snap.total_tokens || 0).toLocaleString()} · Est. Cost: $${(snap.cost_usd || 0).toFixed(4)}` }, `🪙 ${fmtTokens(snap.total_tokens)}`) : null,
       el("span", { class: "rail-hosted", title: `${snap.hosted_count || 0} runs hosted · cap ${snap.max_concurrent_runs}` }, `${snap.hosted_count || 0}/${snap.max_concurrent_runs}`),
       // B1-4: reconnect affordance — the badge re-establishes the SSE stream
       // when it has fallen back to polling.
@@ -1491,7 +1523,7 @@ function renderCenterStream() {
     snap.has_spec ? el("span", { class: "hdr-pill" }, "spec ✓") : null,
     snap.has_assembly ? el("span", { class: "hdr-pill" }, "assembly ✓") : null,
     snap.phase_status === "in_progress" && mainAgentId() ? el("span", { class: "hdr-pill", style: "color:var(--accent-purple);" }, `🤖 ${mainAgentId()}…`) : null,
-    snap.total_tokens ? el("span", { class: "hdr-pill", style: "color:var(--accent-amber);", title: `Running token count: ${(snap.total_tokens || 0).toLocaleString()} tokens` }, `🪙 ${fmtTokens(snap.total_tokens)}`) : null,
+    (snap.total_tokens !== undefined && snap.total_tokens !== null) ? el("span", { class: "hdr-pill", style: "color:var(--accent-amber);", title: `Running token count: ${(snap.total_tokens || 0).toLocaleString()} tokens` }, `🪙 ${fmtTokens(snap.total_tokens)}`) : null,
     el("span", { class: "hdr-pill dim" }, `${snap.events_count || 0} events`),
   ]);
 

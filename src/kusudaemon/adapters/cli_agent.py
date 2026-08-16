@@ -21,11 +21,73 @@ _SECRET_PATTERNS = (
 )
 
 
+import json
+from typing import Any
+
+from ..v1.gates import estimate_tokens
+
+
 def redact_secrets(text: str) -> str:
     """Mask credential values in text before it is logged or shown to a role."""
     for pattern in _SECRET_PATTERNS:
         text = pattern.sub(r"\1***REDACTED***", text)
     return text
+
+
+def extract_tokens_from_actions_log(
+    actions_log: str, prompt: str = "", visible_output: str = ""
+) -> dict[str, Any]:
+    """Extract token usage and cost metrics from an episode's action/trace log."""
+    prompt_tokens = 0
+    completion_tokens = 0
+    reasoning_tokens = 0
+    cost_usd = 0.0
+    has_usage = False
+
+    for line in actions_log.splitlines():
+        line = line.strip()
+        if not line or not line.startswith("{"):
+            continue
+        try:
+            rec = json.loads(line)
+        except Exception:
+            continue
+        rtype = rec.get("type") or rec.get("role")
+        if rtype == "usage":
+            has_usage = True
+            pt = int(rec.get("prompt_tokens", 0) or 0)
+            ct = int(rec.get("completion_tokens", 0) or 0)
+            rt = int(rec.get("reasoning_tokens", 0) or 0)
+            prompt_tokens += pt
+            completion_tokens += ct
+            reasoning_tokens += rt
+            if rec.get("cost_usd") is not None:
+                try:
+                    cost_usd += float(rec["cost_usd"])
+                except (ValueError, TypeError):
+                    pass
+        elif rtype == "message" and not has_usage:
+            pt = int(rec.get("prompt_tokens", 0) or 0)
+            ct = int(rec.get("completion_tokens", 0) or 0)
+            if pt or ct:
+                prompt_tokens += pt
+                completion_tokens += ct
+
+    if not has_usage and prompt_tokens == 0 and completion_tokens == 0:
+        if prompt:
+            prompt_tokens = max(1, estimate_tokens(prompt))
+        out_text = visible_output or actions_log
+        if out_text:
+            completion_tokens = max(1, estimate_tokens(out_text))
+
+    total_tokens = prompt_tokens + completion_tokens + reasoning_tokens
+    return {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "reasoning_tokens": reasoning_tokens,
+        "total_tokens": total_tokens,
+        "cost_usd": cost_usd if has_usage and cost_usd > 0 else None,
+    }
 
 
 class CommandAgentAdapter:
@@ -143,6 +205,7 @@ class CommandAgentAdapter:
             else ""
         )
         runtime_signals = detect_runtime_signals(stdout_log)
+        token_info = extract_tokens_from_actions_log(actions_log, prompt, visible_output)
         if result.termination_reason == "timeout":
             error = f"Episode timed out after {budget.max_duration_seconds}s."
         else:
@@ -166,6 +229,11 @@ class CommandAgentAdapter:
                 ),
                 "stderr_chars": len(result.stderr),
                 "stderr_tail": redact_secrets(result.stderr[-2000:]),
+                "prompt_tokens": token_info["prompt_tokens"],
+                "completion_tokens": token_info["completion_tokens"],
+                "reasoning_tokens": token_info["reasoning_tokens"],
+                "total_tokens": token_info["total_tokens"],
+                "cost_usd": token_info["cost_usd"],
             },
         )
 

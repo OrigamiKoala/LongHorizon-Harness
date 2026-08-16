@@ -180,6 +180,7 @@ class TraceEntry(NamedTuple):
     cost_usd: float | None = None
     duration_ms: int | None = None
     logs: str | None = None
+    node_id: str | None = None
     extra: dict[str, Any] | None = None
 
 

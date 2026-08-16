@@ -182,6 +182,26 @@ class BackendRoleProvider(RoleProviderBase):
             if episode_result is None:
                 raise ProviderError(f"role episode failed on backend {self.backend}")
 
+            try:
+                from ..v0.cost import CostLedger
+                from ..v0.run_dir import cost_path
+
+                cp = cost_path(self.run_dir)
+                if cp.parent.exists():
+                    meta = episode_result.metadata or {}
+                    CostLedger(cp).record(
+                        role="role",
+                        phase="role",
+                        node="-",
+                        model=self.model or self.backend,
+                        prompt_tokens=int(meta.get("prompt_tokens", 0) or 0),
+                        completion_tokens=int(meta.get("completion_tokens", 0) or 0),
+                        reasoning_tokens=int(meta.get("reasoning_tokens", 0) or 0),
+                        cost_usd=float(meta["cost_usd"]) if meta.get("cost_usd") is not None else None,
+                    )
+            except Exception:
+                pass
+
             # Extract output
             content = (episode_result.metadata or {}).get("assistant_visible_output") or ""
             if not content.strip():
