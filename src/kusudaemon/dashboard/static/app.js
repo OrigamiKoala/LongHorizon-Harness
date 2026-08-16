@@ -649,6 +649,17 @@ function fmtTokens(n) {
   return num + " tok";
 }
 
+const _CHAT_ROLE_LABEL = {
+  user: "👤 User",
+  assistant: "🤖 Agent",
+  system: "⚙️ System",
+  thinking: "💭 Reasoning",
+  diff: "📝 File Modification",
+  tool_call: "🔧 Tool Call",
+  tool: "📋 Tool Result",
+  usage: "📊 Token Usage",
+};
+
 function renderToolChatEntry(e, key) {
   const isCall = e.role === "tool_call";
   const toolName = e.tool_name || (isCall ? "Tool call" : "Tool result");
@@ -2560,7 +2571,7 @@ function renderAsmTab() {
       el("span", { class: c.passed ? "gate-pass" : "gate-fail" }, (c.passed ? "✓" : "✕") + " " + (c.name || c.id || "")),
       el("div", { class: "asm-details" }, lines),
     ]);
-  }) : el("div", { class: "dim" }, "(no checks recorded)");
+  }) : [el("div", { class: "dim" }, "(no checks recorded)")];
   return el("div", { class: "asm-body" }, [
     el("div", { class: "sub-hdr" }, "CROSS-CUTTING CHECKS"),
     ...rows,
