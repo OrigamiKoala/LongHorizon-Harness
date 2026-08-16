@@ -79,3 +79,13 @@ def test_json_io_helpers():
     bad_obj, bad_err = _parse_json_object("[1, 2, 3]")
     assert bad_obj is None
     assert "not a JSON object" in bad_err
+
+    # Test trailing usage records are skipped
+    log_with_usage = (
+        '{"items": ["a", "b"], "verdict": "pass"}\n'
+        '{"type": "usage", "prompt_tokens": 100, "completion_tokens": 20, "reasoning_tokens": 0, "total_tokens": 120}'
+    )
+    test_schema = {"type": "object", "required": ["items", "verdict"], "properties": {"items": {"type": "array"}, "verdict": {"type": "string"}}}
+    parsed_usage, err_usage = extract_last_json_object(log_with_usage, schema=test_schema)
+    assert parsed_usage == {"items": ["a", "b"], "verdict": "pass"}
+    assert err_usage == ""

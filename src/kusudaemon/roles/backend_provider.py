@@ -204,11 +204,15 @@ class BackendRoleProvider(RoleProviderBase):
 
             # Extract output
             content = (episode_result.metadata or {}).get("assistant_visible_output") or ""
-            if not content.strip():
-                # Fallback to scanning actions_log for valid JSON
-                parsed, parse_err = extract_last_json_object(episode_result.actions_log)
-            else:
+            parsed = None
+            parse_err = ""
+            if content.strip():
                 parsed, parse_err = _parse_json_object(content)
+                if parsed is not None and parsed.get("type") in {"usage", "logdir", "heartbeat", "thinking", "system", "session_captured"}:
+                    parsed = None
+            if parsed is None:
+                # Fallback to scanning actions_log for valid JSON matching schema
+                parsed, parse_err = extract_last_json_object(episode_result.actions_log, schema=schema)
 
             if parsed is not None:
                 schema_errors = validate(parsed, schema)

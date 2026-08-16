@@ -38,18 +38,26 @@ def _parse_json_object(content: str) -> tuple[dict[str, Any] | None, str]:
     return parsed, ""
 
 
-def extract_last_json_object(text: str) -> tuple[dict[str, Any] | None, str]:
+_HARNESS_METADATA_TYPES = {"usage", "logdir", "heartbeat", "thinking", "system", "session_captured"}
+
+
+def extract_last_json_object(
+    text: str, schema: dict[str, Any] | None = None
+) -> tuple[dict[str, Any] | None, str]:
     """Extract the last valid JSON object from arbitrary text or log traces.
 
     Attempts standard parsing first; if that fails, scans backwards for balanced
-    curly braces `{ ... }` and attempts JSON decoding.
+    curly braces `{ ... }` and attempts JSON decoding, skipping harness metadata lines.
     """
     if not text or not text.strip():
         return None, "empty response"
 
     parsed, err = _parse_json_object(text)
-    if parsed is not None:
-        return parsed, ""
+    if parsed is not None and parsed.get("type") not in _HARNESS_METADATA_TYPES:
+        if schema is None or not validate(parsed, schema):
+            return parsed, ""
+
+    first_fallback: dict[str, Any] | None = None
 
     # Scan backwards for JSON object substrings
     last_brace_idx = text.rfind("}")
@@ -70,10 +78,19 @@ def extract_last_json_object(text: str) -> tuple[dict[str, Any] | None, str]:
             candidate = text[found_start : last_brace_idx + 1]
             try:
                 obj = json.loads(candidate)
-                if isinstance(obj, dict):
-                    return obj, ""
+                if isinstance(obj, dict) and obj.get("type") not in _HARNESS_METADATA_TYPES:
+                    if schema is not None:
+                        if not validate(obj, schema):
+                            return obj, ""
+                        if first_fallback is None:
+                            first_fallback = obj
+                    else:
+                        return obj, ""
             except json.JSONDecodeError:
                 pass
         last_brace_idx = text.rfind("}", 0, last_brace_idx)
+
+    if first_fallback is not None:
+        return first_fallback, ""
 
     return None, err
