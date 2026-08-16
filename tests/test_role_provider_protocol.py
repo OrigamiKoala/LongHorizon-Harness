@@ -89,3 +89,48 @@ def test_json_io_helpers():
     parsed_usage, err_usage = extract_last_json_object(log_with_usage, schema=test_schema)
     assert parsed_usage == {"items": ["a", "b"], "verdict": "pass"}
     assert err_usage == ""
+
+    # Extra data on line 2 (e.g. char 110 error case)
+    extra_data = '{"status": "ok", "count": 42}\nExtra data: line 2 column 1'
+    obj_extra, err_extra = _parse_json_object(extra_data)
+    assert obj_extra == {"status": "ok", "count": 42}
+    assert err_extra == ""
+
+    # Fenced JSON with trailing prose
+    fenced_trailing = '```json\n{"status": "ok", "count": 42}\n```\nHere is some explanation.'
+    obj_fenced, err_fenced = _parse_json_object(fenced_trailing)
+    assert obj_fenced == {"status": "ok", "count": 42}
+    assert err_fenced == ""
+
+    # Braces inside string values
+    braces_str = '{"defect": "formula {x} is invalid", "verdict": "fail"}'
+    obj_braces, err_braces = extract_last_json_object(f"Preamble\n{braces_str}\nPostamble")
+    assert obj_braces == {"defect": "formula {x} is invalid", "verdict": "fail"}
+    assert err_braces == ""
+
+
+def test_openai_provider_complete_json_with_extra_data():
+    def mock_transport(url: str, payload: dict[str, Any], headers: dict[str, str]) -> dict[str, Any]:
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": '{"status": "ok", "count": 42}\nExtra data: line 2 column 1 (char 110)',
+                    }
+                }
+            ],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+        }
+
+    p = OpenAICompatibleProvider(model="test-model", transport=mock_transport)
+    schema = {
+        "type": "object",
+        "required": ["status", "count"],
+        "properties": {
+            "status": {"type": "string"},
+            "count": {"type": "integer"},
+        },
+    }
+    result = p.complete_json([{"role": "user", "content": "hello"}], schema=schema)
+    assert result == {"status": "ok", "count": 42}
+

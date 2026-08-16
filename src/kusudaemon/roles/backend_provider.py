@@ -210,6 +210,8 @@ class BackendRoleProvider(RoleProviderBase):
                 parsed, parse_err = _parse_json_object(content)
                 if parsed is not None and parsed.get("type") in {"usage", "logdir", "heartbeat", "thinking", "system", "session_captured"}:
                     parsed = None
+                if parsed is None:
+                    parsed, parse_err = extract_last_json_object(content, schema=schema)
             if parsed is None:
                 # Fallback to scanning actions_log for valid JSON matching schema
                 parsed, parse_err = extract_last_json_object(episode_result.actions_log, schema=schema)
