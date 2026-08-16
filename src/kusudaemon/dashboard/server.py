@@ -287,7 +287,22 @@ def _post_node_bypass(handler: "DashboardRequestHandler", match: Any, body: dict
     node_id = unquote(match.group(1))
     process = str(body.get("process", ""))
     ok = handler.state.bypass_node(node_id, process=process)
-    return (200, {"ok": True, "node_id": node_id, "process": process}) if ok else (400, {"ok": False, "error": "failed to bypass node"})
+    warning = None
+    if ok:
+        run_dir = handler.state._attached_dir()
+        if run_dir:
+            from ..pipeline.bypass import bypass_dir, _safe_token
+            flag_file = bypass_dir(run_dir) / f"{_safe_token(node_id)}.json"
+            if flag_file.exists():
+                try:
+                    data = json.loads(flag_file.read_text(encoding="utf-8"))
+                    warning = data.get("warning")
+                except Exception:
+                    pass
+    resp: dict[str, Any] = {"ok": True, "node_id": node_id, "process": process}
+    if warning:
+        resp["warning"] = warning
+    return (200, resp) if ok else (400, {"ok": False, "error": "failed to bypass node"})
 
 
 @_route("GET", r"^/api/node/([^/]+)/split$")
@@ -413,8 +428,11 @@ def _get_node_thinking(handler: "DashboardRequestHandler", match: Any, body: dic
             d["cost_usd"] = e.cost_usd
         if e.duration_ms is not None:
             d["duration_ms"] = e.duration_ms
-        if e.logs is not None:
+        if getattr(e, "logs", None) is not None:
             d["logs"] = e.logs
+        ts_val = getattr(e, "timestamp", None)
+        if ts_val is not None:
+            d["timestamp"] = ts_val
         return d
 
     serialized = [_serialize_entry(i, e) for i, e in enumerate(entries)]
@@ -534,23 +552,29 @@ def _get_node_version(handler: "DashboardRequestHandler", match: Any, body: dict
     return (200, {"text": text}) if text is not None else (404, {"error": "not found"})
 
 
-@_route("GET", r"^/api/node/([^/]+)/diff/([^/]+)$")
+@_route("GET", r"^/api/node/([^/]+)/diff(?:/([^/]+))?$")
 def _get_node_diff(handler: "DashboardRequestHandler", match: Any, body: dict) -> tuple[int, Any]:
     """Diff one prior version snapshot against the current artifact —
     ``rendering.diff_lines``, pre-classified into add/remove/context/
     header/hunk so the frontend styles without re-parsing unified-diff
     markers itself (same contract the deleted TUI's Diff tab relied on)."""
     node_id = unquote(match.group(1))
-    tag = unquote(match.group(2))
-    old_text = handler.state.version_snapshot(node_id, tag)
+    tag = unquote(match.group(2)) if match.group(2) else "latest"
+    resolved_tag = tag
+    if tag in ("current", "latest"):
+        versions = handler.state.list_versions(node_id)
+        if not versions:
+            return 404, {"error": "no prior versions to diff against"}
+        resolved_tag = versions[-1]
+    old_text = handler.state.version_snapshot(node_id, resolved_tag)
     if old_text is None:
         return 404, {"error": "no such version"}
     current = handler.state.artifact(node_id) or ""
     lines = [
         {"kind": line.kind, "text": line.text}
-        for line in rendering.diff_lines(old_text, current, old_label=tag, new_label="current")
+        for line in rendering.diff_lines(old_text, current, old_label=resolved_tag, new_label="current")
     ]
-    return 200, {"lines": lines}
+    return 200, {"lines": lines, "tag": resolved_tag}
 
 
 @_route("POST", r"^/api/node/([^/]+)/interject$")

@@ -155,13 +155,39 @@ async def run_repair(
     candidate_path = node_artifact_path(run_dir, repair_id)
     candidate_text = candidate_path.read_text(encoding="utf-8") if candidate_path.exists() else ""
 
-    episode_ok = result.status == "done" and bool(candidate_text.strip())
-    gate_results = evaluate_gates(node.gates, candidate_text) if episode_ok else []
-    gates_ok = episode_ok and all_passed(gate_results)
+    from ..pipeline.bypass import is_node_bypassed
+    from ..pipeline.corruption import check_artifact_text_corruption
+
+    bypassed = is_node_bypassed(run_dir, node.id, "review") or is_node_bypassed(run_dir, node.id) or is_node_bypassed(run_dir, repair_id)
+
+    episode_ok = result.status == "done" and (bool(candidate_text.strip()) or bypassed)
+    gate_results = evaluate_gates(node.gates, candidate_text) if (result.status == "done" and bool(candidate_text.strip())) else []
+    gates_ok = episode_ok and (all_passed(gate_results) or bypassed)
 
     verdict = ReviewVerdict(node_id=node.id, items=[], verdict="fail")
     if gates_ok:
-        if disable_review:
+        if bypassed:
+            corrupted, reason = check_artifact_text_corruption(candidate_text, node=node)
+            if corrupted:
+                import warnings
+                warnings.warn(
+                    f"Bypassing review for node {node.id} with empty or corrupted artifact: {reason}",
+                    UserWarning,
+                    stacklevel=2,
+                )
+                log.append(
+                    {
+                        "node_id": node.id,
+                        "role": "reviewer",
+                        "round": 0,
+                        "type": "node_bypass_warning",
+                        "detail": f"review bypassed on empty or corrupted artifact: {reason}",
+                        "warning": reason,
+                        "ts": time.time(),
+                    }
+                )
+            verdict = ReviewVerdict(node_id=node.id, items=[], verdict="pass")
+        elif disable_review:
             verdict = ReviewVerdict(node_id=node.id, items=[], verdict="pass")
         else:
             verdict = review_node(node, candidate_text, provider)

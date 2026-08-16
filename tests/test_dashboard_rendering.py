@@ -234,5 +234,60 @@ class ErrorClassificationTest(unittest.TestCase):
         self.assertEqual(entries, [rendering.TraceEntry("system", "Saved to `hello.py`")])
 
 
+class TimestampAndUsageMergeTest(unittest.TestCase):
+    def test_timestamp_extracted_on_trace_entries(self) -> None:
+        lines = [
+            json.dumps({"type": "message", "role": "assistant", "content": "Hello world", "timestamp": 1700000000.5}),
+            json.dumps({"type": "tool_call", "name": "run_command", "args": {"cmd": "ls"}, "timestamp": 1700000005.0}),
+        ]
+        entries = rendering.parse_trace("\n".join(lines))
+        self.assertEqual(len(entries), 2)
+        self.assertEqual(entries[0].timestamp, 1700000000.5)
+        self.assertEqual(entries[0].role, "assistant")
+        self.assertEqual(entries[1].timestamp, 1700000005.0)
+        self.assertEqual(entries[1].role, "tool_call")
+
+    def test_usage_merged_onto_preceding_turn_entry(self) -> None:
+        lines = [
+            json.dumps({"type": "tool_call", "name": "run_command", "args": {"cmd": "pytest"}, "timestamp": 1700000010.0}),
+            json.dumps({
+                "type": "usage",
+                "tokens": 450,
+                "prompt_tokens": 300,
+                "completion_tokens": 150,
+                "reasoning_tokens": 50,
+                "cost_usd": 0.0025,
+                "timestamp": 1700000012.0,
+            }),
+        ]
+        entries = rendering.parse_trace("\n".join(lines))
+        self.assertEqual(len(entries), 1)
+        tool_entry = entries[0]
+        self.assertEqual(tool_entry.role, "tool_call")
+        self.assertEqual(tool_entry.tokens, 450)
+        self.assertEqual(tool_entry.prompt_tokens, 300)
+        self.assertEqual(tool_entry.completion_tokens, 150)
+        self.assertEqual(tool_entry.reasoning_tokens, 50)
+        self.assertEqual(tool_entry.cost_usd, 0.0025)
+        self.assertEqual(tool_entry.timestamp, 1700000010.0)
+
+    def test_standalone_usage_when_no_preceding_entry(self) -> None:
+        lines = [
+            json.dumps({
+                "type": "usage",
+                "tokens": 100,
+                "prompt_tokens": 80,
+                "completion_tokens": 20,
+                "timestamp": 1700000020.0,
+            }),
+        ]
+        entries = rendering.parse_trace("\n".join(lines))
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0].role, "usage")
+        self.assertEqual(entries[0].tokens, 100)
+        self.assertEqual(entries[0].timestamp, 1700000020.0)
+
+
 if __name__ == "__main__":
     unittest.main()
+

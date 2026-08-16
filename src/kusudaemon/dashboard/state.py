@@ -861,6 +861,26 @@ class RunState:
         from ..pipeline.bypass import set_node_bypass
 
         set_node_bypass(run_dir, node_id, process)
+        if process in ("review", "", "all", "*") and node_id not in ("*", "all"):
+            try:
+                tree_file = tree_path(run_dir)
+                if tree_file.is_file():
+                    tree = TaskTree.load(tree_file)
+                    node = tree.nodes.get(node_id)
+                    if node and node.status in ("awaiting_review", "pending", "blocked"):
+                        node.status = "passed"
+                        node.last_defect = ""
+                        tree.save(tree_file)
+                        from ..v1.round_loop import _write_audit, _read_artifact
+                        from ..v1.reviewer import ReviewVerdict
+                        _write_audit(
+                            run_dir,
+                            node,
+                            ReviewVerdict(node_id=node.id, items=[], verdict="pass"),
+                            artifact_text=_read_artifact(run_dir, node.id),
+                        )
+            except Exception:
+                pass
         self._invalidate_file_cache(events_path(run_dir))
         return True
 
@@ -1561,13 +1581,27 @@ class RunState:
             return None
         return _read_text(node_artifact_path(run_dir, node_id)) if _safe_node_id(node_id) else None
 
+    def list_versions(self, node_id: str) -> list[str]:
+        run_dir = self._attached_dir()
+        if run_dir is None or not _safe_node_id(node_id):
+            return []
+        return _list_versions(run_dir, node_id)
+
     def version_snapshot(self, node_id: str, tag: str) -> str | None:
         run_dir = self._attached_dir()
         if run_dir is None or not _safe_node_id(node_id) or not _safe_node_id(tag):
             return None
-        target = (versions_dir(run_dir, node_id) / tag).resolve()
+        vdir = versions_dir(run_dir, node_id)
+        if tag in ("current", "latest"):
+            versions = self.list_versions(node_id)
+            if not versions:
+                return None
+            tag = versions[-1]
+        target = (vdir / tag).resolve()
+        if not target.is_file() and (vdir / f"{tag}.md").is_file():
+            target = (vdir / f"{tag}.md").resolve()
         try:
-            target.relative_to(versions_dir(run_dir, node_id).resolve())
+            target.relative_to(vdir.resolve())
         except ValueError:
             return None
         return _read_text(target)
@@ -1593,52 +1627,40 @@ class RunState:
         if text and text.strip():
             return own_path
         if node_id in {"main", "root", "harness"}:
-            # §E20g (2026-08-12 audit): resolving "main" used to call
-            # ``self.snapshot()`` — a full snapshot build (tree summary,
-            # tier/escalation history, models lookup, the whole run list —
-            # everything ``snapshot()`` assembles) just to read back
-            # ``phase`` and ``subagents``. Both are available far more
-            # narrowly: ``phase.json`` directly, and ``self.subagents()``
-            # (fed the already-cached event log, so it's not even a fresh
-            # events.jsonl read) — the same data ``mainAgentId()`` on the
-            # client side computes purely from ``snap.subagents`` already.
             current_phase = str((_read_json(phase_path(run_dir)) or {}).get("phase", ""))
             if current_phase:
-                phase_trace_path = node_trace_path(run_dir, current_phase)
+                phase_trace_path = node_trace_path(run_dir, f"phase-{current_phase}")
                 phase_text = _read_text(phase_trace_path)
                 if phase_text and phase_text.strip():
                     return phase_trace_path
-        # §F5 (2026-08-12): for any node whose own trace is empty or missing,
-        # check whether a live subagent matching this node_id wrote to a
-        # logdir-backed trace path instead (the AGY/gptme adapters write
-        # their trace via a logdir path, not directly to traces/<id>.jsonl).
-        # For non-main nodes this is the same walk the "main" branch already
-        # does for live subagents — we just don't restrict it to the
-        # {main, root, harness} guard any more.
+                phase_trace_path2 = node_trace_path(run_dir, current_phase)
+                phase_text2 = _read_text(phase_trace_path2)
+                if phase_text2 and phase_text2.strip():
+                    return phase_trace_path2
         for sub in self.subagents(events=self._cached_events(run_dir)):
             sub_id = sub.get("id")
             if not sub_id:
                 continue
-            # Prefer the subagent that matches the requested node_id; fall
-            # back to any live subagent for "main"-like pseudo-ids.
             if sub_id != node_id and node_id not in {"main", "root", "harness"}:
                 continue
-            # For a non-pseudo node_id, include non-live (completed/blocked)
-            # subagents too — so historical trace is shown after a node stops.
             sub_path = node_trace_path(run_dir, sub_id)
             sub_text = _read_text(sub_path)
             if sub_text and sub_text.strip():
                 return sub_path
         traces_dir = run_dir / "traces"
         if traces_dir.exists():
-            # For "main"-like ids, use the most recently written trace.
-            # For specific node ids, only use their own file from traces/.
             if node_id in {"main", "root", "harness"}:
                 trace_files = sorted(traces_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
                 for tf in trace_files:
                     txt = _read_text(tf)
                     if txt and txt.strip():
                         return tf
+            else:
+                specific_trace = traces_dir / f"{node_id}.jsonl"
+                if specific_trace.exists():
+                    txt = _read_text(specific_trace)
+                    if txt and txt.strip():
+                        return specific_trace
         return own_path
 
     def trace_entries(self, node_id: str) -> list[TraceEntry] | None:

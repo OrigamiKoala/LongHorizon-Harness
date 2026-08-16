@@ -97,8 +97,11 @@ def check_no_gate_drift(run_dir: str | Path, tree: TaskTree) -> CheckResult:
     include content that has drifted out of compliance."""
     run_dir = Path(run_dir)
     problems = []
+    from ..pipeline.bypass import is_node_bypassed
     for node in tree.nodes.values():
         if node.status != "passed":
+            continue
+        if is_node_bypassed(run_dir, node.id, "review") or is_node_bypassed(run_dir, node.id):
             continue
         text = _read_artifact(run_dir, node.id)
         results = evaluate_gates(node.gates, text)

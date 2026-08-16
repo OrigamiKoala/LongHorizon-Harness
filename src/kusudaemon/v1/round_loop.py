@@ -193,6 +193,7 @@ async def dispatch_node(
     await _transition_after_writer(
         node, tree, tree_path, result.status == "done", gate_results, max_attempts, log,
         tree_lock=tree_lock,
+        run_dir=run_dir,
     )
 
 
@@ -253,6 +254,7 @@ async def review_and_transition_node(
             cached_verdict = None
 
     from ..pipeline.bypass import is_node_bypassed
+    from ..pipeline.corruption import check_artifact_text_corruption
 
     bypassed = is_node_bypassed(run_dir, node.id, "review") or is_node_bypassed(run_dir, node.id)
 
@@ -268,6 +270,25 @@ async def review_and_transition_node(
             }
         )
     elif bypassed:
+        corrupted, reason = check_artifact_text_corruption(artifact_text, node=node)
+        if corrupted:
+            import warnings
+            warnings.warn(
+                f"Bypassing review for node {node.id} with empty or corrupted artifact: {reason}",
+                UserWarning,
+                stacklevel=2,
+            )
+            log.append(
+                {
+                    "node_id": node.id,
+                    "role": "reviewer",
+                    "round": 0,
+                    "type": "node_bypass_warning",
+                    "detail": f"review bypassed on empty or corrupted artifact: {reason}",
+                    "warning": reason,
+                    "ts": time.time(),
+                }
+            )
         verdict = ReviewVerdict(node_id=node.id, items=[], verdict="pass")
         log.append(
             {
@@ -296,6 +317,25 @@ async def review_and_transition_node(
             await asyncio.sleep(0.1)
 
         if bypassed:
+            corrupted, reason = check_artifact_text_corruption(artifact_text, node=node)
+            if corrupted:
+                import warnings
+                warnings.warn(
+                    f"Bypassing review for node {node.id} with empty or corrupted artifact: {reason}",
+                    UserWarning,
+                    stacklevel=2,
+                )
+                log.append(
+                    {
+                        "node_id": node.id,
+                        "role": "reviewer",
+                        "round": 0,
+                        "type": "node_bypass_warning",
+                        "detail": f"review bypassed on empty or corrupted artifact: {reason}",
+                        "warning": reason,
+                        "ts": time.time(),
+                    }
+                )
             verdict = ReviewVerdict(node_id=node.id, items=[], verdict="pass")
             log.append(
                 {
@@ -414,6 +454,7 @@ async def run_round_loop(
     tree = TaskTree.load(tree_path)
     log = EventLog(events_path(run_dir))
     manifest = manifest_path(run_dir)
+    from ..pipeline.bypass import is_node_bypassed
     default_budget = writer_budget or EpisodeBudget()
     tree_lock = asyncio.Lock()
     provider_sem = (
@@ -467,8 +508,15 @@ async def run_round_loop(
     in_flight_dispatch = [n for n in tree.nodes.values() if n.status == "dispatched"]
     for chunk in chunks(in_flight_dispatch):
         await asyncio.gather(*(dispatch(n) for n in chunk))
-    in_flight_review = [n for n in tree.nodes.values() if n.status == "awaiting_review"]
+    in_flight_review = [
+        n for n in tree.nodes.values()
+        if n.status == "awaiting_review"
+        or (n.status in ("pending", "blocked") and (is_node_bypassed(run_dir, n.id, "review") or is_node_bypassed(run_dir, n.id)))
+    ]
     for chunk in chunks(in_flight_review):
+        for n in chunk:
+            if n.status != "awaiting_review":
+                n.status = "awaiting_review"
         await asyncio.gather(*(review(n) for n in chunk))
 
     # §11.10.16: round indices continue across process runs. round_index
@@ -564,6 +612,11 @@ async def run_round_loop(
         for chunk in chunks(wave):
             for node in chunk:
                 while node.status == "pending" and node.attempts < max_attempts:
+                    if is_node_bypassed(run_dir, node.id, "review") or is_node_bypassed(run_dir, node.id):
+                        node.status = "awaiting_review"
+                        await _save_tree_locked(tree, tree_path, tree_lock)
+                        await review(node)
+                        break
                     # §E15 (c): before starting a new retry attempt — the
                     # node is simply left "pending" (its state from the
                     # just-failed attempt), not marked failed or blocked.
@@ -594,10 +647,28 @@ async def _transition_after_writer(
     max_attempts: int,
     log: EventLog,
     tree_lock: asyncio.Lock | None = None,
+    run_dir: str | Path | None = None,
 ) -> None:
-    if episode_ok and all_passed(gate_results):
+    from ..pipeline.bypass import is_node_bypassed
+
+    r_dir = run_dir or Path(tree_path).parent
+    bypassed = is_node_bypassed(r_dir, node.id, "review") or is_node_bypassed(r_dir, node.id)
+    gates_passed = all_passed(gate_results)
+
+    if episode_ok and (gates_passed or bypassed):
         node.status = "awaiting_review"
         node.last_defect = ""
+        if not gates_passed and bypassed:
+            log.append(
+                {
+                    "node_id": node.id,
+                    "role": "harness",
+                    "round": 0,
+                    "type": "node_gates_bypassed",
+                    "detail": "gates failed but review bypassed by operator; proceeding to review",
+                    "unmet": [result.gate for result in gate_results if not result.passed],
+                }
+            )
     else:
         node.attempts += 1
         node.status = "blocked" if node.attempts >= max_attempts else "pending"

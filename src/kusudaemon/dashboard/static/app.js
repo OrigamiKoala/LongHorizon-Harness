@@ -61,6 +61,7 @@ const state = {
   nodeDetailLoading: false,
   agentTab: "overview",   // node sub-tabs: 'overview' | 'chat' | 'gates' | 'artifact' | 'versions' | 'diff'
   nodeDiff: null,
+  selectedDiffTag: undefined,
   nodeThinking: null,
   artifactsDetail: null,
   selectedArtifactTag: undefined,
@@ -300,32 +301,33 @@ function snapshotFingerprint(snap) {
 // (the old loadMainAgentThinking() re-parsed a multi-MB trace per tick
 // just to render this one id).
 function mainAgentId() {
-  const subs = (state.snapshot && state.snapshot.subagents) || [];
-  const live = subs.find((s) => s.live);
-  return live ? live.id : (subs.length ? subs[subs.length - 1].id : "");
+  const snap = state.snapshot;
+  if (!snap) return "";
+  const subs = snap.subagents || [];
+  // Main agent is strictly a phase agent or main harness agent, NEVER a worker node subagent
+  const livePhase = subs.find((s) => (s.kind === "phase" || String(s.id).startsWith("phase-")) && s.live);
+  if (livePhase) return livePhase.id;
+  const anyPhase = subs.find((s) => s.kind === "phase" || String(s.id).startsWith("phase-"));
+  if (anyPhase) return anyPhase.id;
+  if (snap.phase && snap.phase !== "execute") return `phase-${snap.phase}`;
+  return "";
 }
 
-// §F1 (PLAN-AUDIT.md §F1, 2026-08-12): live thinking for the followed agent,
-// appended into the main run-stream feed — not just a header pill. Follows
-// the same target mainAgentId() already computes (live subagent, else most
-// recently dispatched), so no new "which agent" state is introduced. Each
-// tick asks only for what's new via the ?since= cursor server.py's §F1 fix
-// added; entries accumulate in state.mainThinking and are capped client-side
-// at CHAT_RENDER_CAP, same as the per-node Chat tab already does.
+// §F1: live thinking for the main/phase agent only, appended into the main
+// run-stream feed. Subagent thinking belongs solely in each subagent's
+// specific Chat tab.
 function loadMainThinking() {
   const id = mainAgentId();
-  if (!id) return;
+  if (!id) {
+    if (state.mainThinking && state.mainThinking.agentId) {
+      state.mainThinking = { agentId: null, entries: [], next: 0, loaded: false };
+    }
+    return;
+  }
   if (state.mainThinking.agentId !== id) {
     state.mainThinking = { agentId: id, entries: [], next: 0, loaded: false };
   }
-  // §E23 (2026-08-13): poll only while the followed agent is actually
-  // live, or until its (static) history has been loaded once. The most
-  // recent subagent of a parked/blocked run is not running — keep showing
-  // its last trace in the feed, but stop issuing one `?since=` request per
-  // tick against a trace that cannot grow. Before: the feed polled a frozen
-  // trace forever, which read as "the agent is stuck thinking" while
-  // nothing was running.
-  const live = (state.snapshot.subagents || []).some((s) => s.id === id && s.live);
+  const live = (state.snapshot.subagents || []).some((s) => s.id === id && s.live) || state.snapshot.phase_status === "in_progress";
   if (!live && state.mainThinking.loaded) return;
   const since = state.mainThinking.next;
   apiGet(`/api/node/${encodeURIComponent(id)}/thinking?since=${since}`)
@@ -334,12 +336,6 @@ function loadMainThinking() {
       state.mainThinking.loaded = true;
       const fresh = d.entries || [];
       if (fresh.length) {
-        // B4-5 (IMPLEMENTATION-PLAN-COST-AND-LIVE.md): entries now carry a
-        // server-side monotonic `ts` (index in the trace). Anchor the
-        // stream's sort keys once per agent so ordering between ticks is
-        // strictly by trace order — the old per-tick Date.now() stamping
-        // interleaved slow ticks' entries into the wrong place relative to
-        // the events' server timestamps.
         if (state.mainThinking.sortAnchor === undefined) {
           state.mainThinking.sortAnchor = Date.now() / 1000;
         }
@@ -347,14 +343,9 @@ function loadMainThinking() {
         const stamped = fresh.map((entry, i) => Object.assign({}, entry, {
           node_id: entry.node_id || id,
           subagent_name: entry.subagent_name || entry.node_id || id,
-          sort: base + (entry.ts !== undefined ? entry.ts : i) * 0.001,
+          timestamp: entry.timestamp !== undefined ? entry.timestamp : (base + (entry.ts !== undefined ? entry.ts : i) * 0.001),
+          sort: entry.timestamp ? Number(entry.timestamp) : (base + (entry.ts !== undefined ? entry.ts : i) * 0.001),
         }));
-        // Cursor re-anchor (2026-08-13): trace entries are NOT append-only —
-        // consecutive thinking deltas merge into one entry whose text grows
-        // while `total` stays put. The server therefore re-sends the
-        // boundary entry for `since=next`; replace the last held entry with
-        // it instead of appending a duplicate. `reset` (trace shrank /
-        // rewritten) replaces everything held.
         if (d.reset || state.mainThinking.entries.length === 0) {
           state.mainThinking.entries = stamped;
         } else {
@@ -379,23 +370,18 @@ function loadThinkingIfNeeded(force = false) {
   if (!id) return;
   const cur = state.nodeThinking;
   if (cur !== null && cur !== "loading" && cur.id === id && !force) return;
-  // §scroll fix (2026-08-13): a background refresh must NOT flip the tab
-  // back to the "loading chat…" placeholder. The snapshot's render lands
-  // synchronously right after this call (applySnapshot → render), swapping
-  // the tall chat-feed out for the tiny placeholder — the real scroll
-  // container (.agent-body) clamps to scrollTop 0 — and the fetch's
-  // resolution re-creates the feed at the top. Only the first load (no
-  // data yet) shows the placeholder; refreshes keep the old list visible
-  // until the new one replaces it in place.
   const haveData = cur !== null && cur !== "loading" && cur.id === id;
   if (!haveData) state.nodeThinking = "loading";
   apiGet(`/api/node/${encodeURIComponent(id)}/thinking`)
     .then((d) => {
       if (state.selectedNode !== id) return;
       const rawEntries = d.entries || [];
-      const entries = rawEntries.map((e) => Object.assign({}, e, {
+      const nodeSub = (state.snapshot && (state.snapshot.subagents || []).find((s) => s.id === id)) || {};
+      const baseTs = nodeSub.mtime ? Number(nodeSub.mtime) : (Date.now() / 1000);
+      const entries = rawEntries.map((e, i) => Object.assign({}, e, {
         node_id: e.node_id || id,
         subagent_name: e.subagent_name || e.node_id || id,
+        timestamp: e.timestamp !== undefined ? e.timestamp : (baseTs + (e.ts !== undefined ? e.ts : i) * 0.001),
       }));
       const total = d.total || entries.length;
       const first = entries.length ? entries[0].text : "";
@@ -404,11 +390,6 @@ function loadThinkingIfNeeded(force = false) {
       const prev = state.nodeThinking;
       const changed = prev === null || prev === "loading" || prev.sig !== sig;
       state.nodeThinking = { id, entries, total, sig };
-      // §PERF: force refreshes fire every tick while a live node is
-      // selected; re-render only when the trace actually moved.
-      // §F5 fix: also render on first load for non-live (blocked) nodes
-      // — `changed` is always true on the initial load since prev was
-      // "loading", so this never fires a spurious extra render.
       if (changed) render();
     })
     .catch(() => {
@@ -611,8 +592,23 @@ function badge(status) {
 }
 
 function fmtTime(ts) {
-  if (!ts) return "-";
-  return new Date(ts * 1000).toLocaleTimeString();
+  if (ts === undefined || ts === null || ts === "") return "-";
+  if (typeof ts === "string") {
+    const parsed = Number(ts);
+    if (!isNaN(parsed) && String(parsed) === ts.trim()) {
+      ts = parsed;
+    } else {
+      const d = new Date(ts);
+      if (!isNaN(d.getTime())) return d.toLocaleTimeString();
+      return ts;
+    }
+  }
+  const num = Number(ts);
+  if (isNaN(num) || num <= 0) return "-";
+  const ms = num < 1e11 ? num * 1000 : num;
+  const d = new Date(ms);
+  if (isNaN(d.getTime())) return "-";
+  return d.toLocaleTimeString();
 }
 
 function fmtDur(secs) {
@@ -682,6 +678,7 @@ function renderToolChatEntry(e, key) {
   const agentName = subagentLabel(e, "");
   const toolName = e.tool_name || (isCall ? "Tool call" : "Tool result");
   const toolId = e.tool_id ? ` · ${e.tool_id}` : "";
+  const timeVal = e.timestamp || e.created_at || e.time || e.sort || e.ts;
   const agentBadge = agentName
     ? el("span", { class: "dim", style: "font-size:10.5px; font-weight:600; color:var(--accent-purple); margin-right:4px;" }, `[${agentName}]`)
     : null;
@@ -689,10 +686,13 @@ function renderToolChatEntry(e, key) {
     ? el("span", { class: "tool-status-pill " + (e.exit_code === 0 ? "success" : "error") }, e.exit_code === 0 ? "✓ exit 0" : `✕ exit ${e.exit_code}`)
     : null;
   const tokenBadge = e.tokens
-    ? el("span", { class: "tool-token-pill", title: `Prompt: ${e.prompt_tokens || 0} · Output: ${e.completion_tokens || 0}` }, `🪙 ${fmtTokens(e.tokens)}`)
+    ? el("span", { class: "tool-token-pill", title: `Tokens: ${e.tokens.toLocaleString()} (Prompt: ${(e.prompt_tokens || 0).toLocaleString()} · Completion: ${(e.completion_tokens || 0).toLocaleString()}${e.reasoning_tokens ? ` · Reasoning: ${e.reasoning_tokens.toLocaleString()}` : ""}${e.cost_usd ? ` · Cost: $${e.cost_usd.toFixed(4)}` : ""})` }, `🪙 ${fmtTokens(e.tokens)}`)
     : null;
   const durBadge = e.duration_ms
     ? el("span", { class: "tool-dur-pill" }, `⏱ ${(e.duration_ms / 1000).toFixed(1)}s`)
+    : null;
+  const timeBadge = timeVal !== undefined && timeVal !== null
+    ? el("span", { class: "dim tool-time-pill", style: "font-size:10px; font-family:var(--font-mono); margin-left:auto; margin-right:6px;" }, fmtTime(timeVal))
     : null;
 
   let inputStr = "";
@@ -720,6 +720,7 @@ function renderToolChatEntry(e, key) {
           exitBadge,
           durBadge,
           tokenBadge,
+          timeBadge,
           el("span", { class: "tool-toggle-cue" }, hasDetails ? "▸ details" : ""),
         ]),
         !hasDetails ? el("div", { class: "tool-inline-text" }, summaryText) : null,
@@ -747,8 +748,12 @@ function renderToolChatEntry(e, key) {
 function renderThinkingChatEntry(e, key) {
   const agentName = subagentLabel(e, "");
   const authorLabel = agentName ? `💭 ${agentName} Reasoning` : _CHAT_ROLE_LABEL.thinking;
+  const timeVal = e.timestamp || e.created_at || e.time || e.sort || e.ts;
   const tokenBadge = (e.tokens || e.reasoning_tokens)
-    ? el("span", { class: "thinking-token-pill", title: "Reasoning tokens spent on this thought block" }, `🧠 ${fmtTokens(e.tokens || e.reasoning_tokens)}`)
+    ? el("span", { class: "thinking-token-pill", title: `Reasoning tokens: ${(e.tokens || e.reasoning_tokens).toLocaleString()}` }, `🧠 ${fmtTokens(e.tokens || e.reasoning_tokens)}`)
+    : null;
+  const timeBadge = timeVal !== undefined && timeVal !== null
+    ? el("span", { class: "dim thinking-time-pill", style: "font-size:10px; font-family:var(--font-mono); margin-left:auto; margin-right:6px;" }, fmtTime(timeVal))
     : null;
   const isLong = (e.text || "").length > 250;
   return el("div", { class: "stream-msg agent-chat-entry role-thinking thinking-card", ...(key ? { "data-key": key } : {}) }, [
@@ -756,6 +761,7 @@ function renderThinkingChatEntry(e, key) {
       el("summary", { class: "thinking-summary" }, [
         el("span", { class: "author" }, authorLabel),
         tokenBadge,
+        timeBadge,
         el("span", { class: "thinking-toggle-cue" }, isLong ? "▸ toggle thought" : ""),
       ]),
       el("div", { class: "msg-body thinking-body" }, e.text),
@@ -765,28 +771,42 @@ function renderThinkingChatEntry(e, key) {
 
 function renderUsageChatEntry(e, key) {
   const agentName = subagentLabel(e, "");
-  const authorLabel = agentName ? `📊 ${agentName} Turn Token Usage` : "📊 Turn Token Usage";
+  const authorLabel = agentName ? `📊 ${agentName} Token Consumption` : "📊 Token Consumption";
+  const timeVal = e.timestamp || e.created_at || e.time || e.sort || e.ts;
+  const timeBadge = timeVal !== undefined && timeVal !== null
+    ? el("span", { class: "dim usage-time-pill", style: "font-size:10px; font-family:var(--font-mono); margin-left:auto;" }, fmtTime(timeVal))
+    : null;
+  const promptTokens = e.prompt_tokens || 0;
+  const completionTokens = e.completion_tokens || 0;
+  const reasoningTokens = e.reasoning_tokens || 0;
+  const breakdownStr = (promptTokens || completionTokens || reasoningTokens)
+    ? `Prompt: ${promptTokens.toLocaleString()} · Completion: ${completionTokens.toLocaleString()}${reasoningTokens ? ` · Reasoning: ${reasoningTokens.toLocaleString()}` : ""}`
+    : (e.text || "");
   return el("div", { class: "stream-msg agent-chat-entry role-usage usage-card", ...(key ? { "data-key": key } : {}) }, [
-    el("div", { class: "msg-hdr" }, [
-      el("span", { class: "author", style: "color:var(--accent-green);" }, authorLabel),
-      el("span", { class: "tool-token-pill" }, `🪙 ${fmtTokens(e.tokens)}`),
-      e.cost_usd ? el("span", { class: "dim", style: "font-size:11px;" }, `$${e.cost_usd.toFixed(4)}`) : null,
+    el("div", { class: "msg-hdr", style: "display:flex; align-items:center; gap:8px;" }, [
+      el("span", { class: "author", style: "color:var(--accent-green); font-size:11.5px; font-weight:600;" }, authorLabel),
+      el("span", { class: "tool-token-pill", title: `Prompt: ${promptTokens.toLocaleString()} · Output: ${completionTokens.toLocaleString()}${reasoningTokens ? ` · Reasoning: ${reasoningTokens.toLocaleString()}` : ""}` }, `🪙 ${fmtTokens(e.tokens)}`),
+      e.cost_usd ? el("span", { class: "dim", style: "font-size:10.5px;" }, `$${e.cost_usd.toFixed(4)}`) : null,
+      timeBadge,
     ]),
-    el("div", { class: "msg-body", style: "font-size:11px; font-family:var(--font-mono);" }, [
-      `Prompt: ${(e.prompt_tokens || 0).toLocaleString()} · Completion: ${(e.completion_tokens || 0).toLocaleString()} · Reasoning: ${(e.reasoning_tokens || 0).toLocaleString()}`,
-    ]),
+    breakdownStr ? el("div", { class: "msg-body", style: "font-size:11px; font-family:var(--font-mono); margin-top:4px; color:var(--text-muted);" }, breakdownStr) : null,
   ]);
 }
 
 function renderAssistantChatEntry(e, key) {
   const agentName = subagentLabel(e, "Agent");
+  const timeVal = e.timestamp || e.created_at || e.time || e.sort || e.ts;
   const tokenBadge = e.tokens
-    ? el("span", { class: "tool-token-pill", style: "margin-left:auto;", title: `Tokens: ${e.tokens} (Prompt: ${e.prompt_tokens || 0}, Completion: ${e.completion_tokens || 0})` }, `🪙 ${fmtTokens(e.tokens)}`)
+    ? el("span", { class: "tool-token-pill", title: `Tokens: ${e.tokens.toLocaleString()} (Prompt: ${(e.prompt_tokens || 0).toLocaleString()} · Completion: ${(e.completion_tokens || 0).toLocaleString()}${e.reasoning_tokens ? ` · Reasoning: ${e.reasoning_tokens.toLocaleString()}` : ""}${e.cost_usd ? ` · Cost: $${e.cost_usd.toFixed(4)}` : ""})` }, `🪙 ${fmtTokens(e.tokens)}`)
+    : null;
+  const timeBadge = timeVal !== undefined && timeVal !== null
+    ? el("span", { class: "dim assistant-time-pill", style: "font-size:10px; font-family:var(--font-mono); margin-left:auto;" }, fmtTime(timeVal))
     : null;
   return el("div", { class: "stream-msg agent-chat-entry role-assistant", ...(key ? { "data-key": key } : {}) }, [
     el("div", { class: "msg-hdr" }, [
       el("span", { class: "author" }, `🤖 ${agentName}`),
       tokenBadge,
+      timeBadge,
     ]),
     el("div", { class: "msg-body" }, e.text),
   ]);
@@ -794,11 +814,22 @@ function renderAssistantChatEntry(e, key) {
 
 function renderAgentChatEntry(e, idx) {
   const key = `agent-chat-${e.sort !== undefined ? e.sort : (idx !== undefined ? idx : 0)}-${e.role || ""}-${e.ts !== undefined ? e.ts : (idx !== undefined ? idx : 0)}`;
+  const timeVal = e.timestamp || e.created_at || e.time || e.sort || e.ts;
   if (e.role === "diff") {
     const agentName = subagentLabel(e, "");
     const diffTitle = agentName ? `📝 ${agentName} File Modification` : _CHAT_ROLE_LABEL.diff;
+    const timeBadge = timeVal !== undefined && timeVal !== null
+      ? el("span", { class: "dim diff-time-pill", style: "font-size:10px; font-family:var(--font-mono); margin-left:auto;" }, fmtTime(timeVal))
+      : null;
+    const tokenBadge = e.tokens
+      ? el("span", { class: "tool-token-pill", style: "margin-left:8px;", title: `Tokens: ${e.tokens.toLocaleString()}` }, `🪙 ${fmtTokens(e.tokens)}`)
+      : null;
     return el("div", { class: "stream-card agent-diff-card", "data-key": key }, [
-      el("div", { class: "card-title" }, el("span", null, diffTitle)),
+      el("div", { class: "card-title" }, [
+        el("span", null, diffTitle),
+        tokenBadge,
+        timeBadge,
+      ]),
       el(
         "pre",
         { class: "diff-pre trace-diff-pre" },
@@ -823,8 +854,18 @@ function renderAgentChatEntry(e, idx) {
   if (agentName && (e.role === "system" || e.role === "raw" || e.role === "logdir" || e.role === "error")) {
     label = `${label} (${agentName})`;
   }
+  const timeBadge = timeVal !== undefined && timeVal !== null
+    ? el("span", { class: "dim entry-time-pill", style: "font-size:10px; font-family:var(--font-mono); margin-left:auto;" }, fmtTime(timeVal))
+    : null;
+  const tokenBadge = e.tokens
+    ? el("span", { class: "tool-token-pill", title: `Tokens: ${e.tokens.toLocaleString()}` }, `🪙 ${fmtTokens(e.tokens)}`)
+    : null;
   return el("div", { class: `stream-msg agent-chat-entry role-${e.role}`, "data-key": key }, [
-    label ? el("div", { class: "msg-hdr" }, el("span", { class: "author" }, label)) : null,
+    (label || timeBadge || tokenBadge) ? el("div", { class: "msg-hdr" }, [
+      label ? el("span", { class: "author" }, label) : null,
+      tokenBadge,
+      timeBadge,
+    ]) : null,
     el("div", { class: "msg-body" }, e.text),
   ]);
 }
@@ -895,8 +936,8 @@ function renderPendingEntry(m) {
     el("div", { class: "msg-hdr" }, [
       el("span", { class: "author", style: m.sent ? "color:var(--accent-green);" : "color:var(--accent-amber); font-weight:700;" }, m.sent ? "📨 sent" : "📨 queued"),
       el("span", { class: "dim", style: "font-size:11px;" }, m.sent
-        ? `to ${m.target} · ${fmtTime(m.sentAt)}`
-        : (m.target ? `will send to ${m.target} when it next runs` : "will send when an agent next runs")),
+        ? `to ${m.target || "agent"} · ${fmtTime(m.sentAt || m.ts)}`
+        : (m.target ? `will send to ${m.target} · ${fmtTime(m.ts)}` : `will send when an agent next runs · ${fmtTime(m.ts)}`)),
       actions,
     ]),
     body,
@@ -1043,9 +1084,12 @@ function renderTriageChips(a) {
 // Enter picks the primary one.
 function renderApprovalEntry(a, snap) {
   const isPending = a.status === "pending";
+  const aTime = a.resolved_at || a.created_at || a.updated_at || a.ts;
+  const timeBadge = aTime ? el("span", { class: "dim", style: "font-size:11px; font-family:var(--font-mono); margin-left:auto; margin-right:8px;" }, fmtTime(aTime)) : null;
   const parts = [
     el("div", { class: "card-title", "data-key": `approval-title-${a.approval_id}` }, [
       el("span", { style: isPending ? "color:var(--accent-red); font-weight:700;" : "color:var(--accent-amber); font-weight:700;" }, `⏸ ${isPending ? "APPROVAL" : a.kind.toUpperCase()}: ${a.title}`),
+      timeBadge,
       badge(a.status),
     ]),
   ];
@@ -2102,13 +2146,47 @@ function fetchWorkbenchData(id) {
   if (id === "asm") apiGet("/api/assembly").then((d) => { state.assembly = d; render(); }).catch(() => {});
 }
 
-function loadArtifactsIfNeeded() {
-  if (state.artifactsDetail || !state.nodeDetail) return;
+function loadArtifactsIfNeeded(tag) {
   const id = state.selectedNode;
-  if (!id) return;
-  apiGet(`/api/node/${encodeURIComponent(id)}/artifact`)
-    .then((d) => { state.artifactsDetail = { tag: "current", text: d.text || "" }; render(); })
-    .catch(() => {});
+  if (!id || !state.nodeDetail) return;
+  const targetTag = tag !== undefined ? tag : state.selectedArtifactTag;
+  if (state.artifactsDetail && state.artifactsDetail.nodeId === id && state.artifactsDetail.tag === (targetTag || "current")) {
+    return;
+  }
+  if (targetTag) {
+    apiGet(`/api/node/${encodeURIComponent(id)}/version/${encodeURIComponent(targetTag)}`)
+      .then((d) => { state.artifactsDetail = { nodeId: id, tag: targetTag, text: d.text || "" }; render(); })
+      .catch(() => {});
+  } else {
+    apiGet(`/api/node/${encodeURIComponent(id)}/artifact`)
+      .then((d) => { state.artifactsDetail = { nodeId: id, tag: "current", text: d.text || "" }; render(); })
+      .catch(() => {});
+  }
+}
+
+function loadDiffIfNeeded(tag) {
+  const d = state.nodeDetail;
+  const id = state.selectedNode;
+  if (!id || !d) return;
+  const versions = d.versions || [];
+  if (!versions.length) {
+    state.nodeDiff = { nodeId: id, lines: [], empty: true, noVersions: true };
+    render();
+    return;
+  }
+  const targetTag = tag || state.selectedDiffTag || versions[versions.length - 1];
+  state.selectedDiffTag = targetTag;
+  state.nodeDiff = "loading";
+  render();
+  apiGet(`/api/node/${encodeURIComponent(id)}/diff/${encodeURIComponent(targetTag)}`)
+    .then((r) => {
+      state.nodeDiff = Object.assign({ nodeId: id, tag: targetTag }, r);
+      render();
+    })
+    .catch((err) => {
+      state.nodeDiff = { nodeId: id, tag: targetTag, error: String(err.message || err) };
+      render();
+    });
 }
 
 function openReopen(nodeId) {
@@ -2121,6 +2199,12 @@ function openReopen(nodeId) {
 }
 
 function openNode(id, subTab) {
+  if (state.selectedNode !== id) {
+    state.nodeDiff = null;
+    state.selectedDiffTag = undefined;
+    state.selectedArtifactTag = undefined;
+    state.artifactsDetail = null;
+  }
   state.selectedNode = id;
   state.workbenchTab = "node";
   state.nodeDetailFailed = false;
@@ -2137,6 +2221,10 @@ function closeNode() {
   state.nodeDetailFailed = false;
   state.agentTab = "overview";
   state.workbenchTab = "tree";
+  state.nodeDiff = null;
+  state.selectedDiffTag = undefined;
+  state.selectedArtifactTag = undefined;
+  state.artifactsDetail = null;
   render();
 }
 
@@ -2150,6 +2238,7 @@ function loadNodeDetail(id) {
       state.nodeDetailLoading = false;
       state.nodeDetailFailed = false;
       if (state.agentTab === "artifact" || state.agentTab === "versions") loadArtifactsIfNeeded();
+      if (state.agentTab === "diff") loadDiffIfNeeded();
       render();
     })
     .catch((err) => {
@@ -2258,14 +2347,18 @@ function renderGatesTab() {
     el("span", { class: "dim", style: "margin-left:auto; font-size:11px;" }, it.class || ""),
   ].concat(it.defect ? [el("div", { class: "defect", style: "grid-column:1/-1;" }, it.defect)] : []))) : [el("div", { class: "dim" }, "(no review items)")];
   const truncatedChip = d.truncated ? el("span", { class: "truncated-chip", title: "the artifact was over the reviewer input cap — a section group was truncated for review" }, "⚠ truncated") : null;
-  const bypassReviewBtn = (state.snapshot.control_enabled && d && (d.status === "awaiting_review" || d.status === "dispatched")) ? el("button", {
+  const bypassReviewBtn = (state.snapshot.control_enabled && d && d.status !== "passed" && d.status !== "split") ? el("button", {
     class: "btn-tiny btn-bypass",
     style: "margin-left:auto;",
     title: "Bypass review and accept node as passed",
     onclick: () => {
-      guarded(() => apiPost(`/api/node/${encodeURIComponent(d.id)}/bypass`, { process: "review" }).then(() => {
+      guarded(() => apiPost(`/api/node/${encodeURIComponent(d.id)}/bypass`, { process: "review" }).then((res) => {
         recordCli("bypass", d.id);
-        showToast(`Review bypassed for ${d.id} — node passing`);
+        if (res && res.warning) {
+          showToast(`Review bypassed for ${d.id} (warning: ${res.warning})`, true);
+        } else {
+          showToast(`Review bypassed for ${d.id} — node passing`);
+        }
         refreshSnapshot();
         loadNodeDetail(d.id);
       }));
@@ -2280,18 +2373,81 @@ function renderGatesTab() {
 }
 
 function renderDiffTab() {
+  const nd = state.nodeDetail;
+  const versions = (nd && nd.versions) || [];
+  const versionBtns = versions.length > 1 ? versions.map((v) =>
+    el("button", {
+      class: (state.selectedDiffTag === v || (!state.selectedDiffTag && v === versions[versions.length - 1])) ? "v-active" : "",
+      onclick: () => { loadDiffIfNeeded(v); }
+    }, v)
+  ) : [];
+
+  const subHdr = el("div", { class: "sub-hdr" }, [
+    "DIFF (prior version vs current artifact)",
+    versions.length > 1 ? el("span", { class: "dim", style: "margin-left:auto; font-size:11px;" }, `${versions.length} versions`) : null,
+  ]);
+  const btnBar = versions.length > 1 ? el("div", { class: "v-btns" }, versionBtns) : null;
+
   const d = state.nodeDiff;
-  if (!d) return el("div", { class: "placeholder" }, "loading diff…");
-  const lines = (d.diff || d.text || "").split("\n");
-  return el("pre", { class: "diff-pre" }, lines.map((l) => el("div", { class: `diff-line diff-${diffLineKind(l)}` }, l)));
+  if (d === "loading" || (!d && versions.length)) {
+    return el("div", { class: "diff-tab" }, [subHdr, btnBar, el("div", { class: "placeholder" }, "loading diff…")]);
+  }
+  if (!versions.length || (d && d.noVersions)) {
+    return el("div", { class: "diff-tab" }, [
+      subHdr,
+      el("div", { class: "dim", style: "padding:20px; text-align:center;" }, "(no prior versions — node is on its initial attempt, or no pre-repair snapshots saved)"),
+    ]);
+  }
+  if (d && d.error) {
+    return el("div", { class: "diff-tab" }, [
+      subHdr,
+      btnBar,
+      el("div", { class: "dim", style: "padding:20px; color:var(--accent-red);" }, `Failed to load diff: ${d.error}`),
+    ]);
+  }
+
+  const rawLines = (d && d.lines) || [];
+  if (!rawLines.length) {
+    return el("div", { class: "diff-tab" }, [
+      subHdr,
+      btnBar,
+      el("div", { class: "dim", style: "padding:20px; text-align:center;" }, "(no differences between selected version and current artifact)"),
+    ]);
+  }
+
+  const lineEls = rawLines.map((l) => {
+    const text = typeof l === "string" ? l : (l.text !== undefined ? l.text : "");
+    const kind = (typeof l === "object" && l.kind) ? l.kind : diffLineKind(text);
+    return el("div", { class: `diff-line diff-${kind}` }, text);
+  });
+
+  return el("div", { class: "diff-tab" }, [
+    subHdr,
+    btnBar,
+    el("pre", { class: "diff-pre" }, lineEls),
+  ]);
 }
 
 function renderVersionsTab() {
   const d = state.nodeDetail;
   if (!d) return el("div", { class: "placeholder" }, "loading…");
   const versions = d.versions || [];
-  const currentBtn = el("button", { class: (state.selectedArtifactTag === undefined ? "v-active" : ""), onclick: () => { state.selectedArtifactTag = undefined; loadArtifactsIfNeeded(); render(); } }, "current");
-  const versionBtns = versions.map((v) => el("button", { class: state.selectedArtifactTag === v ? "v-active" : "", onclick: () => { state.selectedArtifactTag = v; loadArtifactsIfNeeded(); render(); } }, v));
+  const currentBtn = el("button", {
+    class: state.selectedArtifactTag === undefined ? "v-active" : "",
+    onclick: () => {
+      state.selectedArtifactTag = undefined;
+      loadArtifactsIfNeeded(undefined);
+      render();
+    }
+  }, "current");
+  const versionBtns = versions.map((v) => el("button", {
+    class: state.selectedArtifactTag === v ? "v-active" : "",
+    onclick: () => {
+      state.selectedArtifactTag = v;
+      loadArtifactsIfNeeded(v);
+      render();
+    }
+  }, v));
   const body = state.artifactsDetail ? el("pre", { class: "artifact-pre" }, state.artifactsDetail.text) : el("div", { class: "placeholder" }, "select a version");
   return el("div", { class: "versions-tab" }, [
     el("div", { class: "sub-hdr" }, "VERSIONS (pre-repair snapshots)"),
@@ -2370,7 +2526,7 @@ function renderAgentTab() {
         loadThinkingIfNeeded(true);
       }
       if (k === "artifact" || k === "versions") loadArtifactsIfNeeded();
-      if (k === "diff") apiGet(`/api/node/${encodeURIComponent(id)}/diff/current`).then((r) => { state.nodeDiff = r; render(); }).catch(() => {});
+      if (k === "diff") loadDiffIfNeeded();
       render();
     } }, label)
   ));

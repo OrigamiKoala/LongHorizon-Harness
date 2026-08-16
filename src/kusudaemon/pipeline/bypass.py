@@ -36,28 +36,68 @@ def set_node_bypass(
     run_dir = Path(run_dir)
     b_dir = bypass_dir(run_dir)
     b_dir.mkdir(parents=True, exist_ok=True)
+
+    warning: str | None = None
+    if process in ("review", "", "*", "all") and node_id not in ("*", "all"):
+        try:
+            from .corruption import check_artifact_text_corruption
+            from ..v1.run_dir import node_artifact_path
+            art_path = node_artifact_path(run_dir, node_id)
+            if not art_path.exists():
+                warning = "artifact is missing or empty"
+            else:
+                text = art_path.read_text(encoding="utf-8")
+                corrupted, warn_reason = check_artifact_text_corruption(text)
+                if corrupted:
+                    warning = warn_reason
+        except Exception as err:
+            warning = f"artifact could not be read: {err}"
+
+    if warning:
+        import warnings
+        warnings.warn(
+            f"Bypassing review for node {node_id} with empty or corrupted artifact: {warning}",
+            UserWarning,
+            stacklevel=2,
+        )
+
     payload = {
         "node_id": node_id,
         "process": process,
         "ts": time.time(),
         "reason": reason,
     }
+    if warning:
+        payload["warning"] = warning
     flag_file = b_dir / f"{_safe_token(node_id)}.json"
     flag_file.write_text(json.dumps(payload), encoding="utf-8")
 
     try:
         log = EventLog(events_path(run_dir))
-        log.append(
-            {
-                "node_id": node_id,
-                "role": "harness",
-                "round": 0,
-                "type": "node_bypass_requested",
-                "process": process,
-                "detail": reason,
-                "ts": time.time(),
-            }
-        )
+        entry = {
+            "node_id": node_id,
+            "role": "harness",
+            "round": 0,
+            "type": "node_bypass_requested",
+            "process": process,
+            "detail": reason,
+            "ts": time.time(),
+        }
+        if warning:
+            entry["warning"] = warning
+        log.append(entry)
+        if warning:
+            log.append(
+                {
+                    "node_id": node_id,
+                    "role": "reviewer",
+                    "round": 0,
+                    "type": "node_bypass_warning",
+                    "detail": f"review bypassed on empty or corrupted artifact: {warning}",
+                    "warning": warning,
+                    "ts": time.time(),
+                }
+            )
     except Exception:
         pass
 

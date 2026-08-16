@@ -182,6 +182,7 @@ class TraceEntry(NamedTuple):
     logs: str | None = None
     node_id: str | None = None
     extra: dict[str, Any] | None = None
+    timestamp: float | str | None = None
 
 
 ROLE_STYLE: dict[str, str] = {
@@ -239,7 +240,12 @@ def _extract_thinking(content: str) -> tuple[str, list[str]]:
     return remaining, thoughts
 
 
-def _emit_assistant_content(entries: list[TraceEntry], content: str, file_state: dict[str, str]) -> None:
+def _emit_assistant_content(
+    entries: list[TraceEntry],
+    content: str,
+    file_state: dict[str, str],
+    timestamp: float | str | None = None,
+) -> None:
     """Split one assistant message into thinking / narration / tool-call /
     diff entries. ``file_state`` tracks each written path's last-known
     content *within this trace* so a second ``save`` to the same path (the
@@ -259,13 +265,13 @@ def _emit_assistant_content(entries: list[TraceEntry], content: str, file_state:
     # tags a live wrapper never saw (a degraded/non-gptme trace), so it's
     # always correct to emit them straight through.
     for thought in thoughts:
-        entries.append(TraceEntry("thinking", thought))
+        entries.append(TraceEntry("thinking", thought, timestamp=timestamp))
 
     pos = 0
     for match in _CODEBLOCK_RE.finditer(content):
         before = content[pos : match.start()].strip()
         if before:
-            entries.append(TraceEntry("assistant", before))
+            entries.append(TraceEntry("assistant", before, timestamp=timestamp))
         pos = match.end()
 
         lang_line = match.group(1).strip()
@@ -279,7 +285,7 @@ def _emit_assistant_content(entries: list[TraceEntry], content: str, file_state:
         if not tool:
             # An unlabeled code block isn't a tool invocation -- leave it
             # as ordinary narration, fence and all.
-            entries.append(TraceEntry("assistant", content[match.start() : match.end()]))
+            entries.append(TraceEntry("assistant", content[match.start() : match.end()], timestamp=timestamp))
             continue
 
         tool_input_val = body if (tool in _FILE_WRITE_TOOLS or tool == "patch") else (arg or body)
@@ -289,6 +295,7 @@ def _emit_assistant_content(entries: list[TraceEntry], content: str, file_state:
                 f"{tool} {arg}".strip(),
                 tool_name=tool,
                 tool_input=tool_input_val,
+                timestamp=timestamp,
             )
         )
 
@@ -303,7 +310,7 @@ def _emit_assistant_content(entries: list[TraceEntry], content: str, file_state:
             new_disk = old_disk + body_disk if tool == "append" else body_disk
             diff_text = format_diff_plain(old_disk, new_disk, old_label=arg, new_label=arg)
             if diff_text and diff_text != "(no differences)":
-                entries.append(TraceEntry("diff", diff_text))
+                entries.append(TraceEntry("diff", diff_text, timestamp=timestamp))
             file_state[arg] = new_disk
         elif tool == "patch" and arg:
             diffs = []
@@ -312,11 +319,11 @@ def _emit_assistant_content(entries: list[TraceEntry], content: str, file_state:
                 if d and d != "(no differences)":
                     diffs.append(d)
             if diffs:
-                entries.append(TraceEntry("diff", "\n".join(diffs)))
+                entries.append(TraceEntry("diff", "\n".join(diffs), timestamp=timestamp))
 
     tail = content[pos:].strip()
     if tail:
-        entries.append(TraceEntry("assistant", tail))
+        entries.append(TraceEntry("assistant", tail, timestamp=timestamp))
 
 
 def parse_trace(raw: str) -> list[TraceEntry]:
@@ -346,12 +353,13 @@ def parse_trace_lines(raw: str, entries: list[TraceEntry], file_state: dict[str,
             continue
         try:
             record = json.loads(line)
-        except json.JSONDecodeError:
+        except Exception:
             entries.append(TraceEntry("raw", line))
             continue
         if not isinstance(record, dict):
             entries.append(TraceEntry("raw", line))
             continue
+        raw_ts = record.get("timestamp") or record.get("ts") or record.get("time") or record.get("created_at")
         rtype = record.get("type")
         if rtype == "heartbeat":
             # PLAN-AUDIT.md §F3: a pure liveness signal from the worker
@@ -362,26 +370,57 @@ def parse_trace_lines(raw: str, entries: list[TraceEntry], file_state: dict[str,
             # explicit skip keeps it out of the feed entirely.)
             continue
         if rtype == "logdir":
-            entries.append(TraceEntry("logdir", f"session started (logdir={record.get('logdir', '')})"))
+            entries.append(TraceEntry("logdir", f"session started (logdir={record.get('logdir', '')})", timestamp=raw_ts))
             continue
         if rtype == "usage":
             pt = int(record.get("prompt_tokens", 0) or 0)
             ct = int(record.get("completion_tokens", 0) or 0)
             rt = int(record.get("reasoning_tokens", 0) or 0)
-            tt = int(record.get("total_tokens", 0) or (pt + ct + rt))
+            tok_raw = record.get("tokens")
+            if tok_raw is None:
+                tok_raw = record.get("total_tokens")
+            tt = int(tok_raw) if tok_raw is not None else (pt + ct + rt)
             cost = record.get("cost_usd")
             cost_val = float(cost) if cost is not None else None
-            entries.append(
-                TraceEntry(
-                    role="usage",
-                    text=f"Tokens: {tt:,} (prompt: {pt:,}, completion: {ct:,}, reasoning: {rt:,})",
-                    tokens=tt,
-                    prompt_tokens=pt,
-                    completion_tokens=ct,
-                    reasoning_tokens=rt,
-                    cost_usd=cost_val,
+            attached = False
+            if entries:
+                for idx in range(len(entries) - 1, -1, -1):
+                    if entries[idx].role in ("tool_call", "tool", "assistant", "diff", "thinking"):
+                        prev = entries[idx]
+                        entries[idx] = TraceEntry(
+                            role=prev.role,
+                            text=prev.text,
+                            tool_name=prev.tool_name,
+                            tool_input=prev.tool_input,
+                            tool_output=prev.tool_output,
+                            tool_id=prev.tool_id,
+                            exit_code=prev.exit_code,
+                            tokens=tt,
+                            prompt_tokens=pt,
+                            completion_tokens=ct,
+                            reasoning_tokens=rt,
+                            cost_usd=cost_val,
+                            duration_ms=prev.duration_ms,
+                            logs=prev.logs,
+                            node_id=prev.node_id,
+                            extra=prev.extra,
+                            timestamp=prev.timestamp or raw_ts,
+                        )
+                        attached = True
+                        break
+            if not attached:
+                entries.append(
+                    TraceEntry(
+                        role="usage",
+                        text=f"Tokens: {tt:,} (prompt: {pt:,}, completion: {ct:,}, reasoning: {rt:,})",
+                        tokens=tt,
+                        prompt_tokens=pt,
+                        completion_tokens=ct,
+                        reasoning_tokens=rt,
+                        cost_usd=cost_val,
+                        timestamp=raw_ts,
+                    )
                 )
-            )
             continue
         role_val = record.get("role")
         if rtype in ("thinking", "thought", "reasoning", "reasoning_content", "think") or role_val in ("thinking", "thought", "reasoning", "reasoning_content", "think"):
@@ -399,6 +438,7 @@ def parse_trace_lines(raw: str, entries: list[TraceEntry], file_state: dict[str,
                         text=prev.text + str_content,
                         tokens=comb_tok,
                         reasoning_tokens=comb_tok,
+                        timestamp=prev.timestamp or raw_ts,
                     )
                 else:
                     entries.append(
@@ -407,11 +447,14 @@ def parse_trace_lines(raw: str, entries: list[TraceEntry], file_state: dict[str,
                             text=str_content,
                             tokens=tok_int,
                             reasoning_tokens=tok_int,
+                            timestamp=raw_ts,
                         )
                     )
             continue
-        if rtype == "message":
-            role = str(record.get("role") or "raw")
+        if rtype in ("tool_call", "tool", "tool_result", "call") or rtype == "message":
+            role = str(record.get("role") or (rtype if rtype in ("tool_call", "tool", "tool_result") else "raw"))
+            if role == "tool_result":
+                role = "tool"
             thinking = record.get("thinking") or record.get("reasoning") or record.get("reasoning_content") or record.get("thought")
             if thinking:
                 th_str = thinking if isinstance(thinking, str) else json.dumps(thinking)
@@ -422,15 +465,16 @@ def parse_trace_lines(raw: str, entries: list[TraceEntry], file_state: dict[str,
                         th_str,
                         tokens=int(th_tok) if th_tok is not None else None,
                         reasoning_tokens=int(th_tok) if th_tok is not None else None,
+                        timestamp=raw_ts,
                     )
                 )
-            content = record.get("content")
+            content = record.get("content") or record.get("text")
             text = content if isinstance(content, str) else (json.dumps(content) if content is not None else "")
 
-            tool_name = record.get("tool_name")
-            tool_input = record.get("tool_input")
-            tool_output = record.get("tool_output")
-            tool_id = record.get("tool_id")
+            tool_name = record.get("tool_name") or record.get("name")
+            tool_input = record.get("tool_input") or record.get("args") or record.get("input") or record.get("parameters")
+            tool_output = record.get("tool_output") or record.get("output") or record.get("result")
+            tool_id = record.get("tool_id") or record.get("id") or record.get("call_id")
             exit_code = record.get("exit_code")
             logs = record.get("logs")
             tokens = record.get("tokens")
@@ -441,7 +485,7 @@ def parse_trace_lines(raw: str, entries: list[TraceEntry], file_state: dict[str,
             duration_ms = record.get("duration_ms")
 
             if text and role == "assistant":
-                _emit_assistant_content(entries, text, file_state)
+                _emit_assistant_content(entries, text, file_state, timestamp=raw_ts)
             elif text or tool_name or tool_output or tool_input is not None:
                 role_out = role if role in ROLE_STYLE else "raw"
                 if role in ("tool", "tool_call"):
@@ -485,12 +529,12 @@ def parse_trace_lines(raw: str, entries: list[TraceEntry], file_state: dict[str,
                         cost_usd=float(cost_usd) if cost_usd is not None else None,
                         duration_ms=int(duration_ms) if duration_ms is not None else None,
                         logs=logs,
+                        timestamp=raw_ts,
                     )
                 )
             continue
-        entries.append(TraceEntry("raw", json.dumps(record)))
+        entries.append(TraceEntry("raw", json.dumps(record), timestamp=raw_ts))
 
 
 def role_style(role: str) -> str:
     return ROLE_STYLE.get(role, "")
-

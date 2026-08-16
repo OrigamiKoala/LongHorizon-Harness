@@ -408,8 +408,32 @@ class SubagentsInterjectDiffThinkingTest(_ServerTestCase):
         self.assertIn("remove", kinds)
         self.assertIn("add", kinds)
 
+    def test_diff_multiple_attempts_defaults_to_latest(self) -> None:
+        versions_dir = self.run_dir / "out" / ".versions" / "1"
+        versions_dir.mkdir(parents=True, exist_ok=True)
+        (versions_dir / "1~repair1.md").write_text("# Intro\n\nAttempt 1 text.", encoding="utf-8")
+        (versions_dir / "1~repair2.md").write_text("# Intro\n\nAttempt 2 text.", encoding="utf-8")
+        
+        # Omitted tag defaults to latest attempt
+        status, payload = self._get("/api/node/1/diff")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["tag"], "1~repair2.md")
+
+        # 'current' tag resolves to latest attempt
+        status, payload = self._get("/api/node/1/diff/current")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["tag"], "1~repair2.md")
+
+        # Extension-less tag resolution
+        status, payload = self._get("/api/node/1/diff/1~repair1")
+        self.assertEqual(status, 200)
+
     def test_diff_unknown_version_is_404(self) -> None:
         status, payload = self._get("/api/node/1/diff/does-not-exist.md")
+        self.assertEqual(status, 404)
+
+    def test_diff_no_versions_is_404(self) -> None:
+        status, payload = self._get("/api/node/2/diff")
         self.assertEqual(status, 404)
 
 
@@ -545,6 +569,29 @@ class ThinkingCursorTest(_ServerTestCase):
         self.assertEqual(second["total"], 4)
         texts = [e["text"] for e in second["entries"]]
         self.assertTrue(all(t.startswith("new turn") for t in texts), f"stitched onto the old parse: {texts}")
+
+    def test_node_thinking_includes_timestamp_and_token_fields(self) -> None:
+        from kusudaemon.v0.run_dir import node_trace_path
+
+        trace_file = node_trace_path(self.run_dir, "1")
+        trace_file.parent.mkdir(parents=True, exist_ok=True)
+        lines = [
+            json.dumps({"type": "tool_call", "name": "run_command", "args": {"cmd": "echo test"}, "timestamp": 1700000100.0}),
+            json.dumps({"type": "usage", "tokens": 250, "prompt_tokens": 200, "completion_tokens": 50, "timestamp": 1700000101.0}),
+            json.dumps({"type": "message", "role": "assistant", "content": "done", "timestamp": 1700000105.0}),
+        ]
+        trace_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        status, payload = self._get("/api/node/1/thinking")
+        self.assertEqual(status, 200)
+        entries = payload["entries"]
+        self.assertEqual(len(entries), 2)
+        self.assertEqual(entries[0]["role"], "tool_call")
+        self.assertEqual(entries[0]["timestamp"], 1700000100.0)
+        self.assertEqual(entries[0]["tokens"], 250)
+        self.assertEqual(entries[0]["prompt_tokens"], 200)
+        self.assertEqual(entries[0]["completion_tokens"], 50)
+        self.assertEqual(entries[1]["role"], "assistant")
+        self.assertEqual(entries[1]["timestamp"], 1700000105.0)
 
 
 class OperatorActionRoutesTest(_ServerTestCase):
@@ -1048,3 +1095,4 @@ class MaxConcurrentRunsTest(_ServerTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

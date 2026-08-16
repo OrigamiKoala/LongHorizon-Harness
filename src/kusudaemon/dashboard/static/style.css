@@ -1456,11 +1456,31 @@ button.icon-btn {
 }
 
 .usage-card {
-  padding: 6px 10px;
-  background: rgba(16, 185, 129, 0.04);
-  border: 1px solid rgba(16, 185, 129, 0.2);
+  padding: 8px 12px;
+  background: rgba(16, 185, 129, 0.06);
+  border: 1px solid rgba(16, 185, 129, 0.25);
   border-radius: 6px;
-  margin: 4px 0;
+  margin: 6px 0;
+}
+
+.usage-card-inline {
+  padding: 4px 8px;
+  background: rgba(16, 185, 129, 0.05);
+  border: 1px solid rgba(16, 185, 129, 0.2);
+  border-radius: 4px;
+  margin: 2px 0;
+}
+
+.tool-time-pill,
+.thinking-time-pill,
+.assistant-time-pill,
+.diff-time-pill,
+.entry-time-pill,
+.usage-time-pill {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-muted);
+  opacity: 0.85;
 }
 
 .hdr-tokens-badge {
