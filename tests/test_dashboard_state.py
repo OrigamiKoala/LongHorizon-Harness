@@ -843,16 +843,24 @@ class OptionsFromBodyFieldCoverageTest(unittest.TestCase):
 
     def test_max_parallel_and_auto_probe_plan_accepted(self) -> None:
         options, _ = RunState._options_from_body(
-            {"max_parallel": "3", "auto_probe_plan": False}, "goal"
+            {"max_parallel": "3", "auto_probe_plan": False, "disable_review": True}, "goal"
         )
         self.assertEqual(options.max_parallel, 3)
         self.assertIsInstance(options.max_parallel, int)
         self.assertFalse(options.auto_probe_plan)
+        self.assertTrue(options.disable_review)
+
+    def test_no_review_alias_accepted(self) -> None:
+        options, _ = RunState._options_from_body(
+            {"no_review": True}, "goal"
+        )
+        self.assertTrue(options.disable_review)
 
     def test_max_parallel_and_auto_probe_plan_defaults(self) -> None:
         options, _ = RunState._options_from_body({}, "goal")
         self.assertEqual(options.max_parallel, 1)
         self.assertTrue(options.auto_probe_plan)
+        self.assertFalse(options.disable_review)
 
 
 class ResumeDoubleDriverGuardTest(unittest.TestCase):

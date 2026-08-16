@@ -82,7 +82,7 @@ class FanOutByHeadingTest(unittest.TestCase):
         )
 
     def test_produces_one_call_per_section_and_merges_all_pass(self) -> None:
-        artifact = self._over_cap_artifact(4, 2500)  # 10k words ~= 13.3k tokens, over 8k cap
+        artifact = self._over_cap_artifact(4, 15_000)  # 60k words ~= 80k tokens, over 50k cap
         self.assertGreater(estimate_tokens(artifact), DEFAULT_ARTIFACT_CAP_TOKENS)
         provider = FakeProvider([{"items": [], "verdict": "pass"} for _ in range(4)])
         verdict = review_node(_node(), artifact, provider)
@@ -92,7 +92,7 @@ class FanOutByHeadingTest(unittest.TestCase):
         self.assertFalse(verdict.truncated)
 
     def test_any_failing_section_fails_the_merged_verdict(self) -> None:
-        artifact = self._over_cap_artifact(4, 2500)
+        artifact = self._over_cap_artifact(4, 15_000)
         responses = [{"items": [], "verdict": "pass"} for _ in range(3)] + [
             {
                 "items": [{"id": "clarity", "pass": False, "defect": "unclear paragraph"}],
@@ -106,7 +106,7 @@ class FanOutByHeadingTest(unittest.TestCase):
         self.assertEqual(verdict.items[0]["defect"], "unclear paragraph")
 
     def test_defects_from_every_section_survive_the_merge_no_dedup(self) -> None:
-        artifact = self._over_cap_artifact(3, 2500)
+        artifact = self._over_cap_artifact(3, 15_000)
         responses = [
             {"items": [{"id": "clarity", "pass": False, "defect": f"defect {i}"}], "verdict": "fail"}
             for i in range(3)
@@ -123,7 +123,7 @@ class FanOutByHeadingTest(unittest.TestCase):
         )
 
     def test_more_than_six_sections_are_grouped_not_dropped(self) -> None:
-        artifact = self._over_cap_artifact(10, 700)  # 7000 words ~= 9.3k tokens, over cap
+        artifact = self._over_cap_artifact(10, 5_000)  # 50000 words ~= 66.7k tokens, over cap
         self.assertGreater(estimate_tokens(artifact), DEFAULT_ARTIFACT_CAP_TOKENS)
         provider = FakeProvider([{"items": [], "verdict": "pass"} for _ in range(MAX_FANOUT_SECTIONS)])
         verdict = review_node(_node(), artifact, provider)
@@ -145,7 +145,7 @@ class NoHeadingsFallbackTest(unittest.TestCase):
     crashing."""
 
     def test_falls_back_to_plain_truncation_and_marks_it(self) -> None:
-        huge = " ".join(["word"] * 60_000)  # no headings, well over cap
+        huge = " ".join(["word"] * 80_000)  # no headings, well over cap
         provider = FakeProvider([{"items": [], "verdict": "pass"}])
         verdict = review_node(_node(), huge, provider)
         self.assertEqual(len(provider.calls), 1)
@@ -160,7 +160,7 @@ class PathologicalMegaSectionTest(unittest.TestCase):
     review outright."""
 
     def test_single_giant_section_is_truncated_and_marked(self) -> None:
-        artifact = _section("## Only Section", 20_000)  # ~26.7k tokens alone
+        artifact = _section("## Only Section", 50_000)  # ~66.7k tokens alone
         self.assertGreater(estimate_tokens(artifact), DEFAULT_ARTIFACT_CAP_TOKENS)
         provider = FakeProvider([{"items": [], "verdict": "pass"}])
         verdict = review_node(_node(), artifact, provider)
@@ -235,7 +235,7 @@ class ShipGateTailDefectTest(unittest.TestCase):
         marker = "INTENTIONAL_DEFECT_MARKER: worked example 3 omits its final step."
         # Five sections; the first four are padding, the fifth (the last
         # 20% of the document) carries the planted defect.
-        sections = [_section(f"## Section {i}", 2000) for i in range(1, 5)]
+        sections = [_section(f"## Section {i}", 10_000) for i in range(1, 5)]
         tail = _section("## Section 5", 50, extra=marker)
         artifact = "".join(sections) + tail
 
@@ -284,7 +284,7 @@ class RegenerateShortCircuitTest(unittest.TestCase):
         )
 
     def test_short_circuits_on_regenerate_defect(self) -> None:
-        artifact = self._over_cap_artifact(4, 2500)
+        artifact = self._over_cap_artifact(4, 15_000)
         responses = [
             {
                 "items": [

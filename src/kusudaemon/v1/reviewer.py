@@ -32,10 +32,10 @@ from .provider import ProviderError
 from .tree import TaskNode
 
 # §11.10.13: the reviewer's input side gets the §8 "small outputs
-# everywhere" treatment. 8k heuristic tokens is well above any leaf the
+# everywhere" treatment. 50k heuristic tokens is well above any leaf the
 # budget gates admit and well below any context window worth paying for —
 # the cap exists to keep a runaway artifact from blowing a one-shot call.
-DEFAULT_ARTIFACT_CAP_TOKENS = 8_000
+DEFAULT_ARTIFACT_CAP_TOKENS = 50_000
 
 # PLAN.md §A9/§B6: "split by top-level heading into <=6 sections... Bounded,
 # no recursion beyond this, and it is the only place a reviewer fans out."

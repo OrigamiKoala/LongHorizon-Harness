@@ -124,6 +124,7 @@ async def run_repair(
     *,
     mode: RepairMode = "patch",
     max_attempts: int = 3,
+    disable_review: bool = False,
 ) -> RepairOutcome:
     """Dispatch one scoped repair for ``node`` and transition it in
     ``tree`` — ``"passed"`` again if the repair clears gates and review,
@@ -160,7 +161,10 @@ async def run_repair(
 
     verdict = ReviewVerdict(node_id=node.id, items=[], verdict="fail")
     if gates_ok:
-        verdict = review_node(node, candidate_text, provider)
+        if disable_review:
+            verdict = ReviewVerdict(node_id=node.id, items=[], verdict="pass")
+        else:
+            verdict = review_node(node, candidate_text, provider)
         # §11.10.11: the repair re-evaluated gates against a *new* candidate
         # — overwrite the dispatch-time cache, and merge (never clobber) it
         # when writing the verdict to the same audit file.

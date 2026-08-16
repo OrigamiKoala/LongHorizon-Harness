@@ -251,6 +251,7 @@ class RunOptions:
     max_total_tokens: int | None = None
     episode_cache: bool = False
     review_sample_rate: float = 0.0
+    disable_review: bool = False
     capabilities: Any = None
 
     def __post_init__(self) -> None:
@@ -295,6 +296,7 @@ class RunOptions:
             "max_total_tokens": self.max_total_tokens,
             "episode_cache": self.episode_cache,
             "review_sample_rate": self.review_sample_rate,
+            "disable_review": self.disable_review,
             "capabilities": self.capabilities,
         }
         if ws_root:
@@ -349,6 +351,7 @@ class RunOptions:
             max_total_tokens=int(data["max_total_tokens"]) if data.get("max_total_tokens") is not None else None,
             episode_cache=bool(data.get("episode_cache", False)),
             review_sample_rate=float(data.get("review_sample_rate", 0.0)),
+            disable_review=bool(data.get("disable_review", False)),
             capabilities=data.get("capabilities"),
         )
 
@@ -1656,6 +1659,7 @@ class RecursiveDriver:
                 log=self.log,
                 max_attempts=DIRECT_MAX_ATTEMPTS,
                 inputs=corpus_inputs,
+                disable_review=self.options.disable_review,
             )
             return None
 
@@ -1714,6 +1718,7 @@ class RecursiveDriver:
             # work instead of only taking effect at the next phase
             # boundary.
             should_halt=self._halted,
+            disable_review=self.options.disable_review,
         )
         tree = self._load_tree()
         if tier == "T1" and tree.is_blocked():
@@ -1919,6 +1924,17 @@ class RecursiveDriver:
         and ``keep_depth_pass``) matches what's on disk from the last time
         it ran clean.
         """
+        if self.options.disable_review:
+            self._log(
+                {
+                    "node_id": "-",
+                    "role": "reviewer",
+                    "round": 0,
+                    "type": "document_review_disabled",
+                    "detail": "review agents disabled; skipping review phase",
+                }
+            )
+            return None
         tree = self._load_tree()
         if tree.is_blocked():
             return False
@@ -2116,7 +2132,7 @@ class RecursiveDriver:
         real run's result is cached afterward via the same
         ``audit/document_review.json`` record ``_phase_review`` writes."""
         run_full_document_review = (
-            self.options.document_review and self._current_tier() == "T3"
+            self.options.document_review and not self.options.disable_review and self._current_tier() == "T3"
         )
         review_digest: str | None = None
         if run_full_document_review:

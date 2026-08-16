@@ -991,6 +991,22 @@ class RunOptionsInlineSpansDefaultTest(unittest.TestCase):
         self.assertFalse(restored.inline_spans)
 
 
+class RunOptionsDisableReviewTest(unittest.TestCase):
+    """Confirm disable_review default is False and round-trips through to_spec/from_spec."""
+
+    def test_default_is_false_and_round_trips(self) -> None:
+        options = RunOptions(goal="g")
+        self.assertFalse(options.disable_review)
+        restored = RunOptions.from_spec(options.to_spec())
+        self.assertFalse(restored.disable_review)
+
+    def test_disable_review_true_round_trips(self) -> None:
+        options = RunOptions(goal="g", disable_review=True)
+        self.assertTrue(options.disable_review)
+        restored = RunOptions.from_spec(options.to_spec())
+        self.assertTrue(restored.disable_review)
+
+
 class EscalateRunFunctionTest(unittest.TestCase):
     """PLAN.md §A4.4 "operator escalate" intervention — pipeline/driver.py's
     escalate_run, the third (of four) wired escalation trigger."""
@@ -1082,6 +1098,64 @@ class TierOverrideArgvTest(unittest.TestCase):
                 ["--runs-root", root_str, "--run-id", "r1", "--goal", "g"]
             )
         self.assertIsNone(captured["options"].tier_override)
+
+
+class DisableReviewArgvTest(unittest.TestCase):
+    """Confirm --disable-review and --no-review flags reach RunOptions.disable_review."""
+
+    def _run_entry(self, argv: list[str]) -> dict:
+        from types import SimpleNamespace
+        from unittest import mock
+
+        from kusudaemon.pipeline.run import run_from_args
+
+        captured: dict = {}
+
+        class _CaptureProvider:
+            def __init__(self, **kwargs) -> None:
+                pass
+
+        class _StubDriver:
+            def __init__(self, run_dir, provider=None, options=None, env=None) -> None:
+                captured["options"] = options
+
+            async def run(self):
+                return SimpleNamespace(status="done", phase="assemble", tree_counts={}, detail=None)
+
+        with (
+            mock.patch("kusudaemon.pipeline.run.OpenAICompatibleProvider", _CaptureProvider),
+            mock.patch("kusudaemon.pipeline.run.RecursiveDriver", _StubDriver),
+        ):
+            rc = run_from_args(argv)
+        self.assertEqual(rc, 0)
+        return captured
+
+    def test_disable_review_flag_reaches_run_options(self) -> None:
+        with tempfile.TemporaryDirectory() as root_str:
+            captured = self._run_entry(
+                [
+                    "--runs-root", root_str, "--run-id", "r1",
+                    "--goal", "g", "--disable-review",
+                ]
+            )
+        self.assertTrue(captured["options"].disable_review)
+
+    def test_no_review_alias_reaches_run_options(self) -> None:
+        with tempfile.TemporaryDirectory() as root_str:
+            captured = self._run_entry(
+                [
+                    "--runs-root", root_str, "--run-id", "r1",
+                    "--goal", "g", "--no-review",
+                ]
+            )
+        self.assertTrue(captured["options"].disable_review)
+
+    def test_no_disable_review_flag_defaults_to_false(self) -> None:
+        with tempfile.TemporaryDirectory() as root_str:
+            captured = self._run_entry(
+                ["--runs-root", root_str, "--run-id", "r1", "--goal", "g"]
+            )
+        self.assertFalse(captured["options"].disable_review)
 
 
 class RunOptionsMaxParallelTest(unittest.TestCase):

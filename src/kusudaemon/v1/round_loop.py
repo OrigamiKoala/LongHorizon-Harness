@@ -209,6 +209,7 @@ async def review_and_transition_node(
     tree_lock: asyncio.Lock | None = None,
     provider_semaphore: asyncio.Semaphore | None = None,
     review_sample_rate: float = 0.0,
+    disable_review: bool = False,
 ) -> None:
     """One Reviewer verdict + status transition for a single node —
     ``run_round_loop``'s original ``review`` closure, pulled out for the
@@ -225,7 +226,7 @@ async def review_and_transition_node(
     verdict_digest = compute_verdict_digest(artifact_text, node.rubric, node.judgment)
     cached_verdict: ReviewVerdict | None = None
     audit_file = audit_path(run_dir, node.id)
-    if audit_file.exists():
+    if not disable_review and audit_file.exists():
         try:
             loaded = json.loads(audit_file.read_text(encoding="utf-8"))
             if (
@@ -251,7 +252,18 @@ async def review_and_transition_node(
         except Exception:
             cached_verdict = None
 
-    if cached_verdict is not None:
+    if disable_review:
+        verdict = ReviewVerdict(node_id=node.id, items=[], verdict="pass")
+        log.append(
+            {
+                "node_id": node.id,
+                "role": "reviewer",
+                "round": 0,
+                "type": "node_review_disabled",
+                "detail": "review agents disabled; auto-passing review",
+            }
+        )
+    elif cached_verdict is not None:
         verdict = cached_verdict
     elif provider_semaphore is not None:
         async with provider_semaphore:
@@ -260,7 +272,7 @@ async def review_and_transition_node(
         verdict = review_node(node, artifact_text, provider)
 
     sampled_disagreement = False
-    if verdict.verdict == "pass" and review_sample_rate > 0.0 and node.judgment:
+    if not disable_review and verdict.verdict == "pass" and review_sample_rate > 0.0 and node.judgment:
         import random
         if random.random() < review_sample_rate:
             sampled = review_node(node, artifact_text, provider, temperature=0.7)
@@ -314,6 +326,7 @@ async def run_round_loop(
     should_halt: Callable[[], bool] | None = None,
     reviewer_provider: RoleProvider | None = None,
     review_sample_rate: float = 0.0,
+    disable_review: bool = False,
 ) -> TaskTree:
     """Drive the Orchestrator/Writer/Reviewer round loop for ``tree.json``.
 
@@ -344,7 +357,7 @@ async def run_round_loop(
 
     Concurrency guards (all inert at ``max_parallel=1``):
     - ``EventLog`` serializes appends with its own ``threading.Lock``
-      (``v0/events.py``).
+    (``v0/events.py``).
     - every ``tree.save`` funnels through one ``asyncio.Lock``
       (``_save_tree_locked``) — the "single-writer discipline".
     - the state mutation + save sequences are synchronous on the single
@@ -407,6 +420,7 @@ async def run_round_loop(
             tree_lock=tree_lock,
             provider_semaphore=provider_sem,
             review_sample_rate=review_sample_rate,
+            disable_review=disable_review,
         )
 
     # §C2: "gather the resume scan" — nodes caught mid-flight by a crash

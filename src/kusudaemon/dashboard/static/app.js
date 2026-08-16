@@ -87,7 +87,7 @@ const state = {
   approvalDrafts: {},
   approvalAnswerDrafts: {},
   pilotDrafts: {},
-  newRun: { runId: "", goal: "", source: "", model: "", compile: "", workspace: "", tier: "", backend: "gptme", dispatch_policy: "deterministic", survey_mode: "auto", max_rounds: 100, max_attempts: 3, max_parallel: 1, document_review: false, inline_spans: false, auto_probe_plan: true },
+  newRun: { runId: "", goal: "", source: "", model: "", compile: "", workspace: "", tier: "", backend: "gptme", dispatch_policy: "deterministic", survey_mode: "auto", max_rounds: 100, max_attempts: 3, max_parallel: 1, document_review: false, inline_spans: false, auto_probe_plan: true, disable_review: false },
   // §3/§6/§7/§10 additions
   // B1-3 (IMPLEMENTATION-PLAN-COST-AND-LIVE.md): honest sseLive — true only
   // while the EventSource is actually delivering; lastSnapshotAt feeds the
@@ -1212,7 +1212,7 @@ function renderRail() {
   return el("div", { class: "rail" + (stalled ? " stalled" : "") + (snap.halted ? " halted" : "") }, [
     el("div", { class: "rail-left" }, segs.length ? segs : [el("span", { class: "rail-no-phase" }, "—")]),
     el("div", { class: "rail-right" }, [
-      snap.total_tokens !== undefined && snap.total_tokens !== null ? el("span", { class: "rail-tokens", title: `Total Tokens: ${(snap.total_tokens || 0).toLocaleString()} · Est. Cost: $${(snap.cost_usd || 0).toFixed(4)}` }, `🪙 ${fmtTokens(snap.total_tokens)}`) : null,
+      snap.total_tokens ? el("span", { class: "rail-tokens", title: `Total Tokens: ${(snap.total_tokens || 0).toLocaleString()} · Est. Cost: $${(snap.cost_usd || 0).toFixed(4)}` }, `🪙 ${fmtTokens(snap.total_tokens)}`) : null,
       el("span", { class: "rail-hosted", title: `${snap.hosted_count || 0} runs hosted · cap ${snap.max_concurrent_runs}` }, `${snap.hosted_count || 0}/${snap.max_concurrent_runs}`),
       // B1-4: reconnect affordance — the badge re-establishes the SSE stream
       // when it has fallen back to polling.
@@ -1387,7 +1387,7 @@ function renderNav() {
   }, [
     el("span", { class: "row-glyph" }, r.attached ? "✅" : "·"),
     el("span", { class: "row-id", title: r.id }, ltrunc(r.id, 14)),
-    r.total_tokens !== undefined ? el("span", { class: "row-tokens", title: `${(r.total_tokens || 0).toLocaleString()} tokens · $${(r.cost_usd || 0).toFixed(4)}` }, fmtTokens(r.total_tokens)) : null,
+    r.total_tokens ? el("span", { class: "row-tokens", title: `${(r.total_tokens || 0).toLocaleString()} tokens · $${(r.cost_usd || 0).toFixed(4)}` }, fmtTokens(r.total_tokens)) : null,
     el("span", { class: "row-pip" }, r.pending_approvals ? `⏸${r.pending_approvals}` : (r.hosted ? "●" : "")),
     el("span", { class: "row-status" }, PHASE_GLYPH[r.status] || "·"),
     snap.control_enabled && (r.hosted || r.status === "in_progress") ? el("button", {
@@ -2724,6 +2724,7 @@ function renderNewRunModal() {
           flag("inline_spans", "inline spans"),
           // §E20k: RunOptions.auto_probe_plan (default True) was missing.
           flag("auto_probe_plan", "auto probe plan"),
+          flag("disable_review", "disable review agents (save tokens)"),
         ]),
       ]),
       el("div", { class: "panel-foot" }, [
@@ -2749,6 +2750,7 @@ function renderNewRunModal() {
             document_review: state.newRun.document_review,
             inline_spans: state.newRun.inline_spans,
             auto_probe_plan: state.newRun.auto_probe_plan,
+            disable_review: state.newRun.disable_review,
           });
           state.newRun = Object.assign({}, state.newRun, { runId: "", goal: "", source: "", compile: "", workspace: "", model: "", tier: "" });
           state.newRunOpen = false;

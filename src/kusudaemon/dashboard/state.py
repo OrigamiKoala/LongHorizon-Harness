@@ -979,7 +979,9 @@ class RunState:
             survey_mode=str(body.get("survey_mode") or "auto"),
             inline_spans=bool(body.get("inline_spans", False)),
             tier_override=tier_override,
+            no_intake=bool(body.get("no_intake", False)),
             auto_probe_plan=bool(body.get("auto_probe_plan", True)),
+            disable_review=bool(body.get("disable_review", body.get("no_review", False))),
         )
         return options, workspace_root
 

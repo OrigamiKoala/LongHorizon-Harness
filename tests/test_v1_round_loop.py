@@ -844,5 +844,58 @@ class HaltStopsAtRoundBoundaryTest(unittest.TestCase):
             self.assertEqual(tree.nodes["a"].status, "passed")
 
 
+class DisableReviewRoundLoopTest(unittest.TestCase):
+    """Confirm disable_review=True skips review_node calls and auto-passes nodes with judgment rubrics."""
+
+    def test_disable_review_skips_reviewer_calls_and_passes(self) -> None:
+        with tempfile.TemporaryDirectory() as root_str:
+            root = Path(root_str)
+            run_dir = create_run_dir(root, "run-no-rev")
+            prompt_dir = root / "prompts"
+            prompt_dir.mkdir(parents=True, exist_ok=True)
+
+            _write_tree(
+                tree_path(run_dir),
+                [
+                    {
+                        "id": "a",
+                        "brief": "node with judgment",
+                        "artifact": "out/a.md",
+                        "gates": ["nonempty"],
+                        "judgment": ["has_proof"],
+                        "rubric": {"has_proof": "must include full proof"},
+                    }
+                ],
+            )
+            # FakeProvider with NO responses queued — any provider call will raise IndexError!
+            provider = FakeProvider([])
+            tree = asyncio.run(
+                run_round_loop(
+                    run_dir,
+                    tree_path(run_dir),
+                    writer_adapter_factory=_adapter_factory(root, run_dir, prompt_dir),
+                    env=LocalEnvironment(tmp_dir=str(prompt_dir)),
+                    provider=provider,
+                    prompt_for_node=lambda node: f"do {node.id}",
+                    writer_budget=EpisodeBudget(max_duration_seconds=30),
+                    disable_review=True,
+                )
+            )
+            self.assertEqual(tree.nodes["a"].status, "passed")
+            self.assertEqual(len(provider.calls), 0)
+
+            # Audit record is written with verdict "pass"
+            audit = json.loads((run_dir / "audit" / "a.json").read_text(encoding="utf-8"))
+            self.assertEqual(audit["node"], "a")
+            self.assertEqual(audit["verdict"], "pass")
+
+            # Event log contains node_review_disabled
+            log = EventLog(events_path(run_dir))
+            events = log.read_all()
+            disabled_events = [e for e in events if e.get("type") == "node_review_disabled"]
+            self.assertEqual(len(disabled_events), 1)
+            self.assertEqual(disabled_events[0]["node_id"], "a")
+
+
 if __name__ == "__main__":
     unittest.main()

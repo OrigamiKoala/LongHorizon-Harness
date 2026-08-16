@@ -129,6 +129,13 @@ def build_parser() -> argparse.ArgumentParser:
         "signals already force >= T2 (IMPLEMENTATION-PLAN-COST-AND-LIVE.md "
         "A5-1).",
     )
+    parser.add_argument(
+        "--disable-review",
+        "--no-review",
+        dest="disable_review",
+        action="store_true",
+        help="Disable review agents across all leaves to save tokens (gates still run).",
+    )
     return parser
 
 
@@ -238,6 +245,7 @@ def run_from_args(argv: list[str] | None = None, *, env: Environment | None = No
             inline_spans=args.inline_spans,
             tier_override=args.tier,
             no_intake=args.no_intake,
+            disable_review=args.disable_review,
         )
 
     driver = RecursiveDriver(

@@ -127,6 +127,7 @@ async def run_direct_episode(
     log: EventLog,
     max_attempts: int = DIRECT_MAX_ATTEMPTS,
     inputs: tuple[str, ...] = (),
+    disable_review: bool = False,
 ) -> TaskNode:
     """T0's whole execute phase: one gated Writer episode, one Reviewer
     verdict (free when the node declares no judgment items, exactly like
@@ -155,7 +156,8 @@ async def run_direct_episode(
         )
     if node.status == "awaiting_review":
         await review_and_transition_node(
-            run_dir, node, tree, path, provider=provider, max_attempts=max_attempts, log=log
+            run_dir, node, tree, path, provider=provider, max_attempts=max_attempts, log=log,
+            disable_review=disable_review,
         )
     # Same "retry in place" shape as run_round_loop's own tail loop
     # (v1/round_loop.py) -- a failed attempt with attempts left is a
@@ -172,6 +174,7 @@ async def run_direct_episode(
         )
         if node.status == "awaiting_review":
             await review_and_transition_node(
-                run_dir, node, tree, path, provider=provider, max_attempts=max_attempts, log=log
+                run_dir, node, tree, path, provider=provider, max_attempts=max_attempts, log=log,
+                disable_review=disable_review,
             )
     return node

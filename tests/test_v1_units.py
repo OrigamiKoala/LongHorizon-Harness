@@ -22,7 +22,11 @@ from kusudaemon.v1.provider import (  # noqa: E402
     RATE_LIMIT_BACKOFFS,
     _consume_sse_lines,
 )
-from kusudaemon.v1.reviewer import cap_artifact_text, review_node  # noqa: E402
+from kusudaemon.v1.reviewer import (  # noqa: E402
+    DEFAULT_ARTIFACT_CAP_TOKENS,
+    cap_artifact_text,
+    review_node,
+)
 from kusudaemon.v1.tree import TaskNode, TaskTree, TreeValidationError  # noqa: E402
 from kusudaemon.v1.writer import run_writer_node, writer_prompt  # noqa: E402
 
@@ -1010,7 +1014,7 @@ class ReviewerInputCapTest(unittest.TestCase):
         )
 
     def test_oversized_artifact_is_truncated_and_marked(self) -> None:
-        huge = " ".join(["word"] * 60_000)  # ~80k heuristic tokens
+        huge = " ".join(["word"] * 80_000)  # ~106k heuristic tokens
         provider = FakeProvider([{"items": [], "verdict": "pass"}])
         verdict = review_node(self._node_with_judgment(), huge, provider)
         self.assertEqual(verdict.verdict, "pass")
@@ -1021,7 +1025,7 @@ class ReviewerInputCapTest(unittest.TestCase):
         user_content = provider.calls[0][0][1]["content"]
         self.assertIn("ARTIFACT TRUNCATED", user_content)
         sent_artifact = user_content.split("Artifact:\n", 1)[1]
-        self.assertLessEqual(estimate_tokens(sent_artifact), 8_000 + 50)
+        self.assertLessEqual(estimate_tokens(sent_artifact), DEFAULT_ARTIFACT_CAP_TOKENS + 50)
 
     def test_small_artifact_passes_through_unmodified(self) -> None:
         small = "Short artifact, no truncation needed."

@@ -125,6 +125,13 @@ def build_pipeline_parser() -> argparse.ArgumentParser:
         help="Skip intake entirely; with it set, classify also skips its "
         "estimate call when signals already force >= T2 (A5-1).",
     )
+    run_parser.add_argument(
+        "--disable-review",
+        "--no-review",
+        dest="disable_review",
+        action="store_true",
+        help="Disable review agents across all leaves to save tokens (gates still run).",
+    )
     run_parser.add_argument("--detach", action="store_true", help="Run in a background subprocess and return immediately.")
 
     resume_parser = sub.add_parser("resume", help="Resume a run after a halt or crash.")
@@ -319,6 +326,8 @@ def cmd_run_detach(argv: argparse.Namespace) -> int:
         command += ["--inline-spans"]
     if getattr(argv, "no_intake", False):
         command += ["--no-intake"]
+    if getattr(argv, "disable_review", False):
+        command += ["--disable-review"]
     for flag, value in (
         ("--model", argv.model),
         ("--provider", getattr(argv, "provider", None)),
@@ -743,6 +752,8 @@ def _run_argv(argv: argparse.Namespace, *, run_id: str | None) -> list[str]:
         parts += ["--survey-mode", argv.survey_mode]
     if getattr(argv, "inline_spans", False):
         parts += ["--inline-spans"]
+    if getattr(argv, "disable_review", False):
+        parts += ["--disable-review"]
     for flag, value in (
         ("--model", argv.model),
         ("--provider", getattr(argv, "provider", None)),
