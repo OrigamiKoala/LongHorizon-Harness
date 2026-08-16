@@ -79,7 +79,7 @@ class BackendRoleProvider(RoleProviderBase):
         self.run_dir = Path(run_dir)
         self.env = env
         self.model = model or ""
-        self.budget = budget or EpisodeBudget(max_duration_seconds=600)
+        self.budget = budget or EpisodeBudget(max_duration_seconds=600, max_output_tokens=2048)
         self.max_episode_retries = max_episode_retries
         self._concurrency = concurrency
         self._adapter_factory = adapter_factory
@@ -182,26 +182,6 @@ class BackendRoleProvider(RoleProviderBase):
             if episode_result is None:
                 raise ProviderError(f"role episode failed on backend {self.backend}")
 
-            try:
-                from ..v0.cost import CostLedger
-                from ..v0.run_dir import cost_path
-
-                cp = cost_path(self.run_dir)
-                if cp.parent.exists():
-                    meta = episode_result.metadata or {}
-                    CostLedger(cp).record(
-                        role="role",
-                        phase="role",
-                        node="-",
-                        model=self.model or self.backend,
-                        prompt_tokens=int(meta.get("prompt_tokens", 0) or 0),
-                        completion_tokens=int(meta.get("completion_tokens", 0) or 0),
-                        reasoning_tokens=int(meta.get("reasoning_tokens", 0) or 0),
-                        cost_usd=float(meta["cost_usd"]) if meta.get("cost_usd") is not None else None,
-                    )
-            except Exception:
-                pass
-
             # Extract output
             content = (episode_result.metadata or {}).get("assistant_visible_output") or ""
             parsed = None
@@ -216,6 +196,31 @@ class BackendRoleProvider(RoleProviderBase):
                 # Fallback to scanning actions_log for valid JSON matching schema
                 parsed, parse_err = extract_last_json_object(episode_result.actions_log, schema=schema)
 
+            try:
+                from ..v0.cost import CostLedger
+                from ..v0.run_dir import cost_path
+
+                cp = cost_path(self.run_dir)
+                if cp.parent.exists():
+                    meta = episode_result.metadata or {}
+                    pt = int(meta.get("prompt_tokens", 0) or 0)
+                    ct = int(meta.get("completion_tokens", 0) or 0)
+                    rt = int(meta.get("reasoning_tokens", 0) or 0)
+                    CostLedger(cp).record(
+                        role="role",
+                        phase="role",
+                        node="-",
+                        model=self.model or self.backend,
+                        prompt_tokens=pt,
+                        completion_tokens=ct,
+                        reasoning_tokens=rt,
+                        cost_usd=float(meta["cost_usd"]) if meta.get("cost_usd") is not None else None,
+                        prompt_text=prompt if pt == 0 else "",
+                        completion_text=(content or episode_result.actions_log) if ct == 0 else "",
+                    )
+            except Exception:
+                pass
+
             if parsed is not None:
                 schema_errors = validate(parsed, schema)
                 if not schema_errors:
@@ -224,13 +229,32 @@ class BackendRoleProvider(RoleProviderBase):
             else:
                 last_error = parse_err or "could not extract JSON object from output"
 
-            # Reprompt on failure
+            # Check for output-cap termination: do not retry repeatedly if capped
+            comp_tokens = int((episode_result.metadata or {}).get("completion_tokens", 0) or 0)
+            if comp_tokens >= 32000 or (self.budget.max_output_tokens and comp_tokens >= self.budget.max_output_tokens):
+                if attempt >= 1:
+                    raise ProviderError(
+                        f"structured output terminated at output cap ({comp_tokens} tokens): {last_error}"
+                    )
+
+            # Reprompt on failure (clean schema restatement, no unbounded message history growth)
+            capped_preview = ""
+            raw_preview = content or episode_result.actions_log
+            if raw_preview:
+                words = raw_preview.split()
+                if len(words) > 150:
+                    capped_preview = f"\n[Output preview: {' '.join(words[:150])}...]"
+                else:
+                    capped_preview = f"\n[Output preview: {raw_preview}]"
+
             base_messages = [
-                *base_messages,
-                {"role": "assistant", "content": content or episode_result.actions_log},
+                *messages,
                 {
                     "role": "user",
-                    "content": f"That did not validate: {last_error}. Return corrected JSON only.",
+                    "content": (
+                        f"That did not validate: {last_error}.{capped_preview}\n\n"
+                        "Return only a single valid JSON object matching the schema. No prose, no reasoning, no code fences."
+                    ),
                 },
             ]
 

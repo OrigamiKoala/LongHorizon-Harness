@@ -87,6 +87,18 @@ def calls_by_role(calls: list[tuple[list[dict[str, str]], dict[str, Any]]]) -> d
     return dict(sorted(counter.items()))
 
 
+def tokens_by_role(calls: list[tuple[list[dict[str, str]], dict[str, Any]]]) -> dict[str, dict[str, int]]:
+    """Total input tokens and call count per role."""
+    results: dict[str, dict[str, int]] = {}
+    for call in calls:
+        messages, schema = call
+        role = role_of_schema(schema)
+        entry = results.setdefault(role, {"calls": 0, "input_tokens": 0})
+        entry["calls"] += 1
+        entry["input_tokens"] += call_input_tokens(call)
+    return dict(sorted(results.items()))
+
+
 # ----------------------------------------------------------------------
 # Per-run measurements over the run directory
 # ----------------------------------------------------------------------

@@ -42,11 +42,8 @@ DEFAULT_TOP_LEVEL_MAX_CHILDREN = 12
 
 _SHAPES = ["prose-dominant", "derivation-dominant", "problem-set-dominant", "reference-dominant"]
 
-PARTITION_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "required": ["children"],
-    "additionalProperties": False,
-    "properties": {
+def _make_partition_schema(with_probes: bool) -> dict[str, Any]:
+    props: dict[str, Any] = {
         "children": {
             "type": "array",
             "minItems": 1,
@@ -69,14 +66,9 @@ PARTITION_SCHEMA: dict[str, Any] = {
                 },
             },
         },
-        # A5-3 (IMPLEMENTATION-PLAN-COST-AND-LIVE.md): the probe-planning
-        # decision folded into the plan call — up to 2 probes per call,
-        # each naming a child of this very call by its id. The item shape
-        # mirrors v4/probe_planner.py's PROBE_SUGGESTIONS_SCHEMA (kind
-        # optional; normalized post-hoc with "web" fallback), so a
-        # suggestion is interchangeable with the probe planner's output —
-        # the research phase consumes one or the other, never both.
-        "probes": {
+    }
+    if with_probes:
+        props["probes"] = {
             "type": "array",
             "maxItems": 2,
             "items": {
@@ -90,9 +82,17 @@ PARTITION_SCHEMA: dict[str, Any] = {
                     "kind": {"type": "string", "maxLength": 32},
                 },
             },
-        },
-    },
-}
+        }
+    return {
+        "type": "object",
+        "required": ["children"],
+        "additionalProperties": False,
+        "properties": props,
+    }
+
+
+PARTITION_SCHEMA: dict[str, Any] = _make_partition_schema(with_probes=True)
+PARTITION_SCHEMA_NO_PROBES: dict[str, Any] = _make_partition_schema(with_probes=False)
 
 _SYSTEM_PROMPT = (
     "You are the Planner in a long-horizon task harness. You never see "

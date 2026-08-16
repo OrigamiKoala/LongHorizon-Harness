@@ -45,6 +45,13 @@ def test_build_role_adapter_matrix(tmp_path: Path):
 
 
 def test_resolve_role_transport(tmp_path: Path, monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("NVIDIA_API_KEY", raising=False)
+    monkeypatch.delenv("OPENCODE_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("KUSUDAEMON_PROVIDER_API_KEY", raising=False)
+    monkeypatch.delenv("KUSUDAEMON_ROLE_TRANSPORT", raising=False)
+    monkeypatch.delenv("KUSUDAEMON_ROLE_BACKEND", raising=False)
     # Default auto with gptme backend -> http
     assert _resolve_role_transport("gptme") == ("gptme", "http")
 
@@ -59,7 +66,14 @@ def test_resolve_role_transport(tmp_path: Path, monkeypatch):
     assert _resolve_role_transport("opencode") == ("opencode", "http")
 
 
-def test_make_role_provider(tmp_path: Path):
+def test_make_role_provider(tmp_path: Path, monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("NVIDIA_API_KEY", raising=False)
+    monkeypatch.delenv("OPENCODE_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("KUSUDAEMON_PROVIDER_API_KEY", raising=False)
+    monkeypatch.delenv("KUSUDAEMON_ROLE_TRANSPORT", raising=False)
+    monkeypatch.delenv("KUSUDAEMON_ROLE_BACKEND", raising=False)
     run_dir = tmp_path / "run_make"
 
     # Direct: with backend='opencode', make_role_provider produces BackendRoleProvider

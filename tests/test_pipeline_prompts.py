@@ -300,7 +300,7 @@ class InlineSpansTest(unittest.TestCase):
             "Inputs (read them with your tools before writing, and cite them "
             f"where relevant):\n- {run_dir / 'spine' / 'unit-01.md'}"
         )
-        self.assertEqual(build_node_prompt(node, run_dir), expected)
+        self.assertEqual(build_node_prompt(node, run_dir, inline_spans=False), expected)
 
     def test_default_prompt_unchanged(self) -> None:
         node = _node(inputs=["spine/unit-01.md"])

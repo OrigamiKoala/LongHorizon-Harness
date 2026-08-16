@@ -1071,7 +1071,7 @@ class RunState:
             max_parallel=int(body.get("max_parallel", 1)),
             document_review=bool(body.get("document_review", False)),
             survey_mode=str(body.get("survey_mode") or "auto"),
-            inline_spans=bool(body.get("inline_spans", False)),
+            inline_spans=bool(body.get("inline_spans", True)),
             tier_override=tier_override,
             no_intake=bool(body.get("no_intake", False)),
             auto_probe_plan=bool(body.get("auto_probe_plan", True)),

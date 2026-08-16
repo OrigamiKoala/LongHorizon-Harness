@@ -28,6 +28,15 @@ DEFAULT_TOP_K = 8
 DEFAULT_RHO = 0.6  # the paper's dual-view fusion weight
 DEFAULT_NEIGHBOR_RADIUS = 1  # Zero-Mem's hierarchy closure
 
+
+def top_k_for_budget(budget_tokens: int, avg_chunk_tokens: int = 800) -> int:
+    """Derive span retrieval top_k such that sum(span.tokens) ~= 2 * budget_tokens."""
+    if budget_tokens <= 0:
+        return DEFAULT_TOP_K
+    target_tokens = 2 * budget_tokens
+    derived = max(4, min(32, round(target_tokens / max(100, avg_chunk_tokens))))
+    return derived
+
 _TERM_RE = re.compile(r"[a-z0-9]+")
 _K1 = 1.5
 _B = 0.75

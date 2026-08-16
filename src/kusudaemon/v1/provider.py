@@ -184,6 +184,7 @@ class OpenAICompatibleProvider(RoleProviderBase):
 
     def _record_usage(self, payload: dict[str, Any], raw: dict[str, Any], content: str) -> None:
         usage = raw.get("usage") if isinstance(raw, dict) else None
+        estimated = False
         if usage and isinstance(usage, dict):
             prompt_tokens = int(usage.get("prompt_tokens", 0) or 0)
             completion_tokens = int(usage.get("completion_tokens", 0) or 0)
@@ -193,6 +194,7 @@ class OpenAICompatibleProvider(RoleProviderBase):
             prompt_tokens = max(1, prompt_tokens)
             completion_tokens = max(1, estimate_tokens(content))
             reasoning_tokens = 0
+            estimated = True
         if self.cost_ledger is not None and hasattr(self.cost_ledger, "record"):
             self.cost_ledger.record(
                 role=self.role,
@@ -202,6 +204,7 @@ class OpenAICompatibleProvider(RoleProviderBase):
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 reasoning_tokens=reasoning_tokens,
+                estimated=estimated,
             )
         if self.on_usage is not None:
             self.on_usage({

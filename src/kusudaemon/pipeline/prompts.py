@@ -45,7 +45,7 @@ from ..v1.manifest import read_all_manifest_entries
 from ..v1.reviewer import DEFAULT_ARTIFACT_CAP_TOKENS, cap_artifact_text
 from ..v1.tree import TaskNode
 from ..v2.contract import load_contract
-from ..v2.retrieval import DEFAULT_TOP_K, retrieve_spans
+from ..v2.retrieval import DEFAULT_TOP_K, retrieve_spans, top_k_for_budget
 from ..v2.run_dir import contract_path
 from ..v2.survey import load_spine
 from .corruption import is_artifact_corrupted
@@ -218,10 +218,11 @@ def segments(
     node: TaskNode,
     run_dir: str | Path,
     *,
-    inline_spans: bool = False,
-    top_k: int = DEFAULT_TOP_K,
+    inline_spans: bool = True,
+    top_k: int | None = None,
     hidden_paths: tuple[str, ...] = (),
     hidden_path_exceptions: tuple[str, ...] = (),
+    resuming: bool = False,
 ) -> list[tuple[str, str]]:
     """Return the ordered list of (label, text) segments making up a Writer's
     prompt (PLAN-EFFICIENCY-AND-HORIZON.md §L10)."""
@@ -258,7 +259,12 @@ def segments(
             return str(resolve_stored(run_dir, item))
 
         if inline_spans:
-            spans_block = _retrieved_spans_block(node, run_dir, top_k)
+            effective_top_k = (
+                top_k
+                if top_k is not None
+                else top_k_for_budget(node.budget.tokens if node.budget and node.budget.tokens > 0 else 0)
+            )
+            spans_block = _retrieved_spans_block(node, run_dir, effective_top_k)
             if spans_block is not None:
                 finding_paths = _non_unit_inputs(node, run_dir)
                 if finding_paths:
@@ -304,12 +310,14 @@ def segments(
             add("retry", _REGENERATE_RETRY_INSTRUCTION + node.last_defect)
         else:
             retry_block = _PATCH_RETRY_INSTRUCTION + node.last_defect
-            prior_artifact = _prior_attempt_artifact(node, run_dir)
-            if prior_artifact is not None:
-                retry_block += (
-                    "\n\nYour previous artifact (fix it in place, then save the "
-                    f"corrected version over it):\n\n{prior_artifact}"
-                )
+            if not resuming:
+                retry_cap = node.budget.tokens if node.budget and node.budget.tokens > 0 else 24_000
+                prior_artifact = _prior_attempt_artifact(node, run_dir, ceiling_tokens=retry_cap)
+                if prior_artifact is not None:
+                    retry_block += (
+                        "\n\nYour previous artifact (fix it in place, then save the "
+                        f"corrected version over it):\n\n{prior_artifact}"
+                    )
             add("retry", retry_block)
     return segs
 
@@ -318,11 +326,12 @@ def build_node_prompt(
     node: TaskNode,
     run_dir: str | Path,
     *,
-    inline_spans: bool = False,
-    top_k: int = DEFAULT_TOP_K,
+    inline_spans: bool = True,
+    top_k: int | None = None,
     segment_tokens: Callable[[str, int], None] | None = None,
     hidden_paths: tuple[str, ...] = (),
     hidden_path_exceptions: tuple[str, ...] = (),
+    resuming: bool = False,
 ) -> str:
     """Assemble a Writer's prompt. ``segment_tokens`` (PLAN.md §C5's
     "mean input tokens per leaf broken down by prompt segment" instrument)
@@ -348,6 +357,7 @@ def build_node_prompt(
         top_k=top_k,
         hidden_paths=hidden_paths,
         hidden_path_exceptions=hidden_path_exceptions,
+        resuming=resuming,
     )
     if segment_tokens is not None:
         for label, text in segs:
@@ -355,7 +365,7 @@ def build_node_prompt(
     return "\n\n".join(text for _, text in segs)
 
 
-def _prior_attempt_artifact(node: TaskNode, run_dir: Path) -> str | None:
+def _prior_attempt_artifact(node: TaskNode, run_dir: Path, ceiling_tokens: int = 24_000) -> str | None:
     """A6-5: the failed attempt's artifact text (``out/<node>.md``), capped,
     or None when there is nothing to inline (missing, or empty — an empty
     file is an honest gate failure from the v0 runner's fallback, inlining
@@ -366,7 +376,7 @@ def _prior_attempt_artifact(node: TaskNode, run_dir: Path) -> str | None:
         return None
     if not text.strip():
         return None
-    return cap_artifact_text(text, DEFAULT_ARTIFACT_CAP_TOKENS)
+    return cap_artifact_text(text, ceiling_tokens)
 
 
 def _non_unit_inputs(node: TaskNode, run_dir: Path) -> list[str]:

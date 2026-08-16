@@ -113,8 +113,20 @@ def _resolve_role_transport(
     elif cfg_transport:
         transport = cfg_transport.lower()
     else:
-        # Default transport: gptme -> http, all CLI backends -> backend
-        transport = "http" if effective_backend == "gptme" else "backend"
+        # Default transport: prefer "http" whenever provider/key or resolve() succeeds,
+        # fallback to "backend" only for keyless CLI setups.
+        if effective_backend == "gptme":
+            transport = "http"
+        else:
+            try:
+                from ..provider_config import resolve
+                res = resolve()
+                if res.api_key and res.base_url:
+                    transport = "http"
+                else:
+                    transport = "backend"
+            except Exception:
+                transport = "backend"
 
     return effective_backend, transport
 

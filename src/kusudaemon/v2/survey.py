@@ -371,6 +371,7 @@ def assemble_spine(
     votes: list[BoundaryVote],
     *,
     min_unit_tokens: int = DEFAULT_MIN_UNIT_TOKENS,
+    max_unit_tokens: int = 2 * DEFAULT_TARGET_UNIT_TOKENS,
     confidence_floor: float = DEFAULT_CONFIDENCE_FLOOR,
 ) -> list[SpineUnit]:
     """Harness-side merge (§4.2 stage 3, no model call): overlapping windows
@@ -405,11 +406,42 @@ def assemble_spine(
         tokens = sum(chunk.tokens for chunk in chunks[start_chunk : end_chunk + 1])
         raw_units.append([start_chunk, end_chunk, label, tokens])
 
-    merged = _apply_min_size_floor(raw_units, min_unit_tokens)
+    split = _split_oversized_units(raw_units, chunks, max_unit_tokens)
+    merged = _apply_min_size_floor(split, min_unit_tokens)
     return [
         SpineUnit(id=f"unit-{i + 1:02d}", label=label, start_chunk=start, end_chunk=end, tokens=tokens)
         for i, (start, end, label, tokens) in enumerate(merged)
     ]
+
+
+def _split_oversized_units(
+    raw_units: list[list[Any]], chunks: list[Chunk], max_tokens: int
+) -> list[list[Any]]:
+    """Split units larger than max_tokens at chunk boundaries so spine units stay within budget."""
+    if not chunks or max_tokens <= 0:
+        return raw_units
+    split_units: list[list[Any]] = []
+    for start, end, label, tokens in raw_units:
+        if tokens <= max_tokens or end <= start:
+            split_units.append([start, end, label, tokens])
+            continue
+        cur_start = start
+        cur_tokens = 0
+        part_idx = 1
+        for c_idx in range(start, end + 1):
+            c_tok = chunks[c_idx].tokens
+            if cur_tokens + c_tok > max_tokens and c_idx > cur_start:
+                part_label = f"{label} (part {part_idx})"
+                split_units.append([cur_start, c_idx - 1, part_label, cur_tokens])
+                cur_start = c_idx
+                cur_tokens = c_tok
+                part_idx += 1
+            else:
+                cur_tokens += c_tok
+        if cur_start <= end:
+            part_label = f"{label} (part {part_idx})" if part_idx > 1 else label
+            split_units.append([cur_start, end, part_label, cur_tokens])
+    return split_units
 
 
 def _apply_min_size_floor(raw_units: list[list[Any]], min_unit_tokens: int) -> list[list[Any]]:

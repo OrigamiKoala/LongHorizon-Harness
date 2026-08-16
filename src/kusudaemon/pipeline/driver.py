@@ -33,6 +33,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import os
 import random
 import time
@@ -249,7 +250,7 @@ class RunOptions:
     always_grant_web_search: bool = True
     max_cost_usd: float | None = None
     max_total_tokens: int | None = None
-    episode_cache: bool = False
+    episode_cache: bool = True
     review_sample_rate: float = 0.0
     disable_review: bool = False
     capabilities: Any = None
@@ -1242,8 +1243,10 @@ class RecursiveDriver:
                 self._log({"node_id": subagent_id, "role": "explorer", "round": 0, "type": "session_captured", "phase": "survey"})
             try:
                 # A2-4: pre-fold chunks up to ~min-unit size before surveying.
-                # Use adaptive prefolding on large inputs so chunk count is bounded.
-                chunks = prefold_chunks(chunks, target_max_chunks=100)
+                # Use adaptive prefolding on large inputs so chunk count is bounded (~2k tokens/chunk).
+                total_tokens = sum(c.tokens for c in chunks)
+                target_chunks = max(100, math.ceil(total_tokens / 2000))
+                chunks = prefold_chunks(chunks, target_max_chunks=target_chunks)
 
                 mode = self.options.survey_mode
                 if mode == "model":
@@ -2650,11 +2653,14 @@ class RecursiveDriver:
         return Path(self.run_dir)
 
     def _prompt_for_node(
-        self, node: TaskNode, *, inline_spans: bool | None = None
+        self,
+        node: TaskNode,
+        *,
+        inline_spans: bool | None = None,
+        resuming: bool = False,
     ) -> str:
         """``build_node_prompt`` with the run's hidden-paths pair injected
-        (PLAN-AUDIT-COST §A6-1): the same (hidden, exceptions) tuples
-        ``build_writer_adapter`` hands the episode's adapter, so the notice
+        automatically so the §A6-1 hidden-paths notice is cacheable: it
         renders once, in the stable region, instead of being appended by
         ``cli_agent.run_episode`` after all per-node content."""
         from .backends import hidden_paths_for_node
@@ -2662,9 +2668,10 @@ class RecursiveDriver:
         hidden, exceptions = hidden_paths_for_node(
             node, self.run_dir, self._writer_workspace_path()
         )
-        kwargs = dict(
+        kwargs: dict[str, Any] = dict(
             hidden_paths=hidden,
             hidden_path_exceptions=exceptions,
+            resuming=resuming,
         )
         if inline_spans is not None:
             kwargs["inline_spans"] = inline_spans

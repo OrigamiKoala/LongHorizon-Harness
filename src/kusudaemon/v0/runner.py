@@ -309,6 +309,8 @@ async def run_node(
             completion_tokens=completion_tokens,
             reasoning_tokens=reasoning_tokens,
             cost_usd=float(cost_usd) if cost_usd is not None else None,
+            prompt_text=prompt if prompt_tokens == 0 else "",
+            completion_text=(existing or result.actions_log) if completion_tokens == 0 else "",
         )
     except Exception:
         pass
@@ -381,15 +383,17 @@ async def _watch_for_session_id(
                 continue
             session_id = record.get("session_id")
             if session_id:
-                log.append(
-                    {
-                        "node_id": node_id,
-                        "role": "writer",
-                        "round": 0,
-                        "type": "session_captured",
-                        "session_id": session_id,
-                    }
-                )
+                if session_id not in captured_logdirs:
+                    captured_logdirs.add(session_id)
+                    log.append(
+                        {
+                            "node_id": node_id,
+                            "role": "writer",
+                            "round": 0,
+                            "type": "session_captured",
+                            "session_id": session_id,
+                        }
+                    )
                 return
             # PLAN-AUDIT.md §E13: don't hardcode session_id as the only
             # event shape a resume-capable adapter can emit. A

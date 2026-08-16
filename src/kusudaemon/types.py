@@ -36,10 +36,13 @@ class ExecResult:
 @dataclass
 class EpisodeBudget:
     max_duration_seconds: int = 1800
+    max_output_tokens: int | None = None
 
     def __post_init__(self) -> None:
         if self.max_duration_seconds < 1:
             raise ValueError("max_duration_seconds must be at least 1")
+        if self.max_output_tokens is not None and self.max_output_tokens < 1:
+            raise ValueError("max_output_tokens must be at least 1")
 
 
 @dataclass

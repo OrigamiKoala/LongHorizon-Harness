@@ -66,6 +66,7 @@ VERDICT_SCHEMA: dict[str, Any] = {
     "properties": {
         "items": {
             "type": "array",
+            "maxItems": 12,
             "items": {
                 "type": "object",
                 "required": ["id", "pass"],

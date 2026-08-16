@@ -37,6 +37,9 @@ def estimate_cost_usd(model: str | None, prompt_tokens: int, completion_tokens: 
     return (prompt_tokens / 1_000_000.0) * 1.00 + (completion_tokens / 1_000_000.0) * 3.00
 
 
+from ..v1.gates import estimate_tokens
+
+
 @dataclass(frozen=True)
 class CostRecord:
     ts: float
@@ -49,6 +52,7 @@ class CostRecord:
     reasoning_tokens: int
     cost_usd: float
     cached: bool = False
+    estimated: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -62,6 +66,7 @@ class CostRecord:
             "reasoning_tokens": self.reasoning_tokens,
             "cost_usd": round(self.cost_usd, 6),
             "cached": self.cached,
+            "estimated": self.estimated,
         }
 
 
@@ -83,8 +88,17 @@ class CostLedger:
         reasoning_tokens: int = 0,
         cost_usd: float | None = None,
         cached: bool = False,
+        estimated: bool = False,
+        prompt_text: str = "",
+        completion_text: str = "",
         ts: float | None = None,
     ) -> CostRecord:
+        if prompt_tokens == 0 and prompt_text:
+            prompt_tokens = max(1, estimate_tokens(prompt_text))
+            estimated = True
+        if completion_tokens == 0 and completion_text:
+            completion_tokens = max(1, estimate_tokens(completion_text))
+            estimated = True
         if cost_usd is None:
             cost_usd = estimate_cost_usd(model, prompt_tokens, completion_tokens)
         rec = CostRecord(
@@ -98,6 +112,7 @@ class CostLedger:
             reasoning_tokens=reasoning_tokens,
             cost_usd=cost_usd,
             cached=cached,
+            estimated=estimated,
         )
         line = json.dumps(rec.to_dict(), sort_keys=True)
         with self._lock:
