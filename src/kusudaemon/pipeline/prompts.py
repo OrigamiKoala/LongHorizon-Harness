@@ -311,7 +311,7 @@ def segments(
         else:
             retry_block = _PATCH_RETRY_INSTRUCTION + node.last_defect
             if not resuming:
-                retry_cap = node.budget.tokens if node.budget and node.budget.tokens > 0 else 24_000
+                retry_cap = node.budget.tokens if node.budget and node.budget.tokens > 0 else DEFAULT_ARTIFACT_CAP_TOKENS
                 prior_artifact = _prior_attempt_artifact(node, run_dir, ceiling_tokens=retry_cap)
                 if prior_artifact is not None:
                     retry_block += (
@@ -365,7 +365,7 @@ def build_node_prompt(
     return "\n\n".join(text for _, text in segs)
 
 
-def _prior_attempt_artifact(node: TaskNode, run_dir: Path, ceiling_tokens: int = 24_000) -> str | None:
+def _prior_attempt_artifact(node: TaskNode, run_dir: Path, ceiling_tokens: int = DEFAULT_ARTIFACT_CAP_TOKENS) -> str | None:
     """A6-5: the failed attempt's artifact text (``out/<node>.md``), capped,
     or None when there is nothing to inline (missing, or empty — an empty
     file is an honest gate failure from the v0 runner's fallback, inlining
